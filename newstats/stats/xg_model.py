@@ -17,6 +17,7 @@ returns None rather than guessing -- callers decide whether to fall back
 
 from __future__ import annotations
 
+import datetime as dt
 import math
 from dataclasses import dataclass
 
@@ -29,25 +30,29 @@ _XG_STAT = "expected_goals_xg"
 _MAX_GOALS = 14  # Poisson grid cutoff; negligible tail mass even for a strong favourite's lambda.
 
 
-def league_average_xg(session: Session) -> float:
-    avg = session.query(func.avg(MatchStat.value)).filter(MatchStat.stat_name == _XG_STAT).scalar()
+def league_average_xg(session: Session, before: dt.datetime | None = None) -> float:
+    q = session.query(func.avg(MatchStat.value)).filter(MatchStat.stat_name == _XG_STAT)
+    if before is not None:
+        q = q.join(Match, Match.id == MatchStat.match_id).filter(Match.kickoff_at < before)
+    avg = q.scalar()
     return float(avg) if avg is not None else 1.35  # ~global average goals/team/match fallback
 
 
-def home_advantage_factor(session: Session) -> float:
+def home_advantage_factor(session: Session, before: dt.datetime | None = None) -> float:
     """avg home-team xG / avg away-team xG across matches with xG on both sides."""
-    home_avg = (
-        session.query(func.avg(MatchStat.value))
-        .join(Match, Match.id == MatchStat.match_id)
-        .filter(MatchStat.stat_name == _XG_STAT, MatchStat.team_id == Match.home_team_id)
-        .scalar()
-    )
-    away_avg = (
-        session.query(func.avg(MatchStat.value))
-        .join(Match, Match.id == MatchStat.match_id)
-        .filter(MatchStat.stat_name == _XG_STAT, MatchStat.team_id == Match.away_team_id)
-        .scalar()
-    )
+
+    def _side_avg(side_col):
+        q = (
+            session.query(func.avg(MatchStat.value))
+            .join(Match, Match.id == MatchStat.match_id)
+            .filter(MatchStat.stat_name == _XG_STAT, MatchStat.team_id == side_col)
+        )
+        if before is not None:
+            q = q.filter(Match.kickoff_at < before)
+        return q.scalar()
+
+    home_avg = _side_avg(Match.home_team_id)
+    away_avg = _side_avg(Match.away_team_id)
     if not home_avg or not away_avg:
         return 1.15  # commonly-cited football home-advantage ballpark
     return float(home_avg) / float(away_avg)
@@ -61,20 +66,25 @@ class TeamXgStrength:
     matches_considered: int
 
 
-def team_xg_strength(session: Session, team_id: int, limit: int = 10) -> TeamXgStrength | None:
-    """Average xG for/against over the team's most recent xG-carrying matches."""
-    for_rows = (
+def team_xg_strength(
+    session: Session, team_id: int, limit: int = 10, before: dt.datetime | None = None
+) -> TeamXgStrength | None:
+    """
+    Average xG for/against over the team's most recent xG-carrying matches.
+
+    `before`, when given, restricts to matches with kickoff_at strictly
+    before that timestamp -- pass the match being predicted's own
+    kickoff_at when backtesting, or the model would be "predicting" a match
+    using that same match's own xG (and any later matches already in the
+    DB) as part of the team's history. Without it this is only safe to call
+    for a genuinely upcoming match that has no xG of its own yet.
+    """
+    for_q = (
         session.query(MatchStat.value)
         .join(Match, Match.id == MatchStat.match_id)
         .filter(MatchStat.stat_name == _XG_STAT, MatchStat.team_id == team_id)
-        .order_by(Match.kickoff_at.desc())
-        .limit(limit)
-        .all()
     )
-    if not for_rows:
-        return None
-
-    against_rows = (
+    against_q = (
         session.query(MatchStat.value)
         .join(Match, Match.id == MatchStat.match_id)
         .filter(
@@ -82,17 +92,22 @@ def team_xg_strength(session: Session, team_id: int, limit: int = 10) -> TeamXgS
             MatchStat.team_id != team_id,
             (Match.home_team_id == team_id) | (Match.away_team_id == team_id),
         )
-        .order_by(Match.kickoff_at.desc())
-        .limit(limit)
-        .all()
     )
+    if before is not None:
+        for_q = for_q.filter(Match.kickoff_at < before)
+        against_q = against_q.filter(Match.kickoff_at < before)
+
+    for_rows = for_q.order_by(Match.kickoff_at.desc()).limit(limit).all()
+    if not for_rows:
+        return None
+    against_rows = against_q.order_by(Match.kickoff_at.desc()).limit(limit).all()
 
     xg_for = [float(v[0]) for v in for_rows]
     xg_against = [float(v[0]) for v in against_rows]
     return TeamXgStrength(
         team_id=team_id,
         xg_for_avg=sum(xg_for) / len(xg_for),
-        xg_against_avg=sum(xg_against) / len(xg_against) if xg_against else league_average_xg(session),
+        xg_against_avg=sum(xg_against) / len(xg_against) if xg_against else league_average_xg(session, before=before),
         matches_considered=len(xg_for),
     )
 
@@ -115,14 +130,23 @@ class MatchPrediction:
     most_likely_score: tuple[int, int]
 
 
-def predict_match(session: Session, home_team_id: int, away_team_id: int) -> MatchPrediction | None:
-    home = team_xg_strength(session, home_team_id)
-    away = team_xg_strength(session, away_team_id)
+def predict_match(
+    session: Session, home_team_id: int, away_team_id: int, before: dt.datetime | None = None
+) -> MatchPrediction | None:
+    """
+    `before` restricts all team-strength and league-average numbers to
+    matches that kicked off strictly before that timestamp. Required for a
+    fair backtest (predicting match X using data that includes match X, or
+    matches after it, isn't a prediction); leave it unset for a genuinely
+    upcoming match.
+    """
+    home = team_xg_strength(session, home_team_id, before=before)
+    away = team_xg_strength(session, away_team_id, before=before)
     if home is None or away is None:
         return None
 
-    league_avg = league_average_xg(session)
-    home_adv = home_advantage_factor(session)
+    league_avg = league_average_xg(session, before=before)
+    home_adv = home_advantage_factor(session, before=before)
 
     attack_home = home.xg_for_avg / league_avg
     defense_away = away.xg_against_avg / league_avg

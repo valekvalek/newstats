@@ -1,3 +1,5 @@
+import datetime as dt
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -141,3 +143,28 @@ def test_latest_1x2_odds_accepts_numeric_selection_labels():
 
     books = latest_1x2_odds(session, match.id)
     assert books == {"bet365": {"Home": 2.0, "Draw": 4.0, "Away": 3.3}}
+
+
+def _event_at(date_str: str, home_name: str, home_link: str, away_name: str, away_link: str) -> dict:
+    e = _event(home_name, home_link, away_name, away_link)
+    e["date"] = date_str
+    return e
+
+
+def test_team_xg_strength_before_excludes_matches_on_or_after_cutoff():
+    """A backtest must not let a team's strength be computed from the match being
+    predicted, or from matches that happened after it -- that's lookahead bias."""
+    session = _session()
+    early = ingest_event(session, "https://fs.test/early?mid=early", _event_at("01.01.2026 20:00", "A", "/team/a/A1/", "X", "/team/x/X1/"))
+    _ingest_xg(session, "https://fs.test/early?mid=early", 1.0, 1.0)
+    late = ingest_event(session, "https://fs.test/late?mid=late", _event_at("10.01.2026 20:00", "A", "/team/a/A1/", "Y", "/team/y/Y1/"))
+    _ingest_xg(session, "https://fs.test/late?mid=late", 5.0, 0.2)
+
+    cutoff = dt.datetime(2026, 1, 5)
+    strength = team_xg_strength(session, early.home_team_id, before=cutoff)
+    assert strength.matches_considered == 1
+    assert strength.xg_for_avg == 1.0  # only the early match counted, not the later 5.0 one
+
+    strength_no_cutoff = team_xg_strength(session, early.home_team_id)
+    assert strength_no_cutoff.matches_considered == 2
+    assert late.home_team_id == early.home_team_id  # sanity: same team in both matches
