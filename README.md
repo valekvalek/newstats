@@ -28,6 +28,59 @@ ID матча не передаётся явным полем — это `?mid=.
 эту реальную форму вывода, не под придуманный контракт. Если формат
 скрапера поменяется, править нужно только этот файл.
 
+## Данные, которых у FlashscoreScraper нет (составы, угловые, карточки)
+
+У самого FlashscoreScraper нет и не будет: игроков, голов по игрокам,
+угловых/штрафных/карточек — на сайте это не часть `event`/`odds`/`event-info`
+выдачи, а отдельные вкладки страницы матча (`Summary` — таймлайн событий,
+`Stats` — командная статистика), которые рендерятся JS и требуют прямого
+скрейпинга HTML, а не CLI-инструмента.
+
+Для этого в `newstats/importer/flashscore.py` есть ещё два импортёра,
+рассчитанные на такой прямой скрейп (не на вывод `main.py`):
+
+- `ingest_match_stats(session, match_url, stats)` — командная статистика
+  матча (угловые, штрафные, владение, удары и т.д.) со страницы
+  `<match_url>/summary/stats/overall/`. Ожидает
+  `[{"label": "Corner kicks", "home": "2", "away": "5"}, ...]`.
+- `ingest_match_events(session, match_url, incidents)` — события матча
+  (голы, передачи, жёлтые/красные карточки) с таймлайна на самой странице
+  матча. Ожидает
+  `[{"type": "goal"|"assist"|"yellow_card"|"red_card", "side": "home"|"away",
+  "player_name": "...", "player_link": "/player/.../..."}, ...]`. Голы одного
+  игрока агрегируются в одну строку (`stat_name="goals"`, `value=2` при дубле),
+  не создают дубликаты.
+
+CLI: `newstats ingest-stats-cmd <url> --file ...` и
+`newstats ingest-events-cmd <url> --file ...` — тот же `--file`/stdin
+паттерн, что и у остальных команд.
+
+Пример скрейпера под эту форму (Playwright + BeautifulSoup, не трогает код
+FlashscoreScraper) — `scripts/collect_match_details.py`.
+
+## Скрипты массового сбора (`scripts/`)
+
+```bash
+uv pip install -e ".[scraping]"
+python -m playwright install chromium
+```
+
+- `scripts/collect_cl_teams.py` — для списка команд (сейчас зашит на 36
+  команд лиги чемпионов 2026/27, но список в начале файла можно заменить
+  на любой) находит последние N матчей каждой команды **во всех турнирах**
+  через их страницы `/team/<slug>/<id>/results/`, прогоняет каждый
+  уникальный матч через настоящий парсер `FootballEventParser` из
+  клона `M3MONs/FlashscoreScraper` и грузит в БД через `ingest_event`.
+  Требует `FLASHSCORE_SCRAPER=/path/to/FlashscoreScraper` (с его
+  собственным venv, playwright-браузерами и зависимостями).
+- `scripts/collect_match_details.py` — второй проход по уже загруженным
+  матчам: досчитывает `kickoff_at`, тянет командную статистику
+  (`ingest_match_stats`) и события матча/голы/карточки
+  (`ingest_match_events`) напрямую с HTML страниц матча.
+
+Оба — asyncio + Playwright, идут по 5 страниц одновременно, идемпотентны
+(повторный запуск просто обновляет те же строки, не плодит дубли).
+
 ## Схема
 
 ```

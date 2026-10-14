@@ -18,6 +18,10 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.4",
 ]
+scraping = [
+    "playwright>=1.58",
+    "beautifulsoup4>=4.14",
+]
 
 [project.scripts]
 newstats = "newstats.cli.main:app"

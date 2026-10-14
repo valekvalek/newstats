@@ -11,9 +11,12 @@ from newstats.db.models import MatchStatus
 from newstats.importer.flashscore import (
     extract_match_id,
     ingest_event,
+    ingest_match_events,
+    ingest_match_stats,
     ingest_odds,
     ingest_standings,
     normalize_status,
+    parse_kickoff,
     parse_score,
 )
 from newstats.stats.form import form_summary
@@ -55,6 +58,79 @@ def test_normalize_status():
     assert normalize_status("Finished") == MatchStatus.FINISHED
     assert normalize_status("Postp.") == MatchStatus.POSTPONED
     assert normalize_status("something new from the site") == MatchStatus.UNKNOWN
+
+
+def test_parse_kickoff():
+    assert parse_kickoff("13.10.2026 22:00") == dt.datetime(2026, 10, 13, 22, 0)
+    assert parse_kickoff(None) is None
+    assert parse_kickoff("not a date") is None
+
+
+def test_ingest_event_sets_kickoff_at():
+    session = _session()
+    match = ingest_event(session, MATCH_1_URL, _load("event.json"))
+    assert match.kickoff_at == dt.datetime(2026, 5, 5, 18, 0)
+
+
+def test_ingest_match_stats_requires_existing_match():
+    session = _session()
+    with pytest.raises(ValueError):
+        ingest_match_stats(session, MATCH_1_URL, [{"label": "Corner kicks", "home": "2", "away": "5"}])
+
+
+def test_ingest_match_stats_parses_percent_and_bracketed_values():
+    session = _session()
+    ingest_event(session, MATCH_1_URL, _load("event.json"))
+    rows = ingest_match_stats(
+        session,
+        MATCH_1_URL,
+        [
+            {"label": "Corner kicks", "home": "2", "away": "5"},
+            {"label": "Ball possession", "home": "35%", "away": "65%"},
+            {"label": "Accurate passes", "home": "285 (81%)", "away": "(93%) 589"},
+        ],
+    )
+    assert len(rows) == 6
+    by_name = {(r.team_id, r.stat_name): r.value for r in rows}
+    from newstats.db.models import Match
+
+    m = session.query(Match).one()
+    assert by_name[(m.home_team_id, "corners")] == 2.0
+    assert by_name[(m.away_team_id, "corners")] == 5.0
+    assert by_name[(m.home_team_id, "possession_pct")] == 35.0
+    assert by_name[(m.home_team_id, "accurate_passes")] == 285.0
+    assert by_name[(m.away_team_id, "accurate_passes")] == 93.0
+
+
+def test_ingest_match_events_requires_existing_match():
+    session = _session()
+    with pytest.raises(ValueError):
+        ingest_match_events(session, MATCH_1_URL, [])
+
+
+def test_ingest_match_events_aggregates_goals_and_cards():
+    session = _session()
+    ingest_event(session, MATCH_1_URL, _load("event.json"))
+    incidents = [
+        {"type": "goal", "side": "home", "player_name": "Barrios P.", "player_link": "/player/barrios-pablo/AaZiGJ9E/"},
+        {"type": "assist", "side": "home", "player_name": "Baena A.", "player_link": "/player/baena-alex/bmeQTB92/"},
+        {"type": "goal", "side": "home", "player_name": "Barrios P.", "player_link": "/player/barrios-pablo/AaZiGJ9E/"},
+        {"type": "yellow_card", "side": "away", "player_name": "Rashford M.", "player_link": "/player/rashford-marcus/COnT2Lh0/"},
+        {"type": "substitution", "side": "home", "player_name": "Someone", "player_link": "/player/x/y/"},
+    ]
+    rows = ingest_match_events(session, MATCH_1_URL, incidents)
+    assert len(rows) == 3  # 2 goals (deduped/aggregated to one row, value=2) + 1 assist + 1 yellow = 3 rows total
+
+    from newstats.db.models import Player
+
+    barrios = session.query(Player).filter_by(external_id="/player/barrios-pablo/AaZiGJ9E/").one()
+    goal_row = next(r for r in rows if r.player_id == barrios.id and r.stat_name == "goals")
+    assert goal_row.value == 2.0
+
+    # re-running with the same incidents must not double-count (idempotent upsert)
+    rows_again = ingest_match_events(session, MATCH_1_URL, incidents)
+    goal_row_again = next(r for r in rows_again if r.player_id == barrios.id and r.stat_name == "goals")
+    assert goal_row_again.value == 2.0
 
 
 def test_ingest_event_is_idempotent():

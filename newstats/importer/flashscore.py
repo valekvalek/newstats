@@ -74,8 +74,11 @@ from sqlalchemy.orm import Session
 
 from newstats.db.models import (
     Match,
+    MatchStat,
     MatchStatus,
     Odds,
+    Player,
+    PlayerMatchStat,
     Sport,
     Standing,
     Team,
@@ -117,6 +120,16 @@ def parse_score(score: str | None) -> tuple[int | None, int | None]:
     if not match:
         return None, None
     return int(match.group(1)), int(match.group(2))
+
+
+def parse_kickoff(date_str: str | None) -> dt.datetime | None:
+    """'13.10.2026 22:00' -> naive datetime in the site's own (unspecified) timezone."""
+    if not date_str:
+        return None
+    try:
+        return dt.datetime.strptime(date_str.strip(), "%d.%m.%Y %H:%M")
+    except ValueError:
+        return None
 
 
 def extract_match_id(match_url: str) -> str:
@@ -194,6 +207,7 @@ def ingest_event(session: Session, match_url: str, event: dict[str, Any], sport_
     match.status_raw = event.get("detail_status")
     match.status = normalize_status(event.get("detail_status"))
     match.home_score, match.away_score = parse_score(event.get("score"))
+    match.kickoff_at = parse_kickoff(event.get("date"))
     session.commit()
     return match
 
@@ -281,6 +295,146 @@ def ingest_standings(
         standing.scraped_at = scraped_at
         session.flush()
         rows.append(standing)
+
+    session.commit()
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Match stats and player events.
+#
+# These two functions consume data M3MONs/FlashscoreScraper's CLI does NOT
+# expose at all (see module docstring: "no concept of players or team-level
+# in-match stats"). Corners/fouls/possession live on a match's own
+# ".../summary/stats/overall/" sub-page, and goals/cards/substitutions live
+# as a timeline of "incident" rows on the plain match summary page — both
+# require rendering the page's JS (Flashscore ships almost no stats in the
+# static HTML), so they're scraped directly with Playwright + BeautifulSoup,
+# not via the FlashscoreScraper package. The shapes below are what that
+# direct scrape produces; see scratchpad/collect_cl_match_details.py for the
+# actual scraper that builds them.
+#
+# stat entry shape: {"label": "Corner kicks", "home": "2", "away": "5"}
+# incident entry shape: {"type": "goal"|"yellow_card"|"red_card", "minute": "1'",
+#                         "side": "home"|"away", "player_name": "Barrios P.",
+#                         "player_link": "/player/barrios-pablo/AaZiGJ9E/"}
+# ---------------------------------------------------------------------------
+
+#: Flashscore stat labels we care about -> our own stat_name. Any label not
+#: listed here is still stored (slugified) so nothing is silently dropped.
+_STAT_LABEL_OVERRIDES = {
+    "Corner kicks": "corners",
+    "Fouls": "fouls",
+    "Ball possession": "possession_pct",
+    "Yellow Cards": "yellow_cards",
+    "Red Cards": "red_cards",
+    "Offsides": "offsides",
+}
+
+
+def _slugify_stat_label(label: str) -> str:
+    return _STAT_LABEL_OVERRIDES.get(label) or re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")
+
+
+def _parse_stat_value(raw: str | None) -> float | None:
+    """'285 (81%)' -> 285.0, '35%' -> 35.0, '0.28' -> 0.28, '' / None -> None."""
+    if not raw:
+        return None
+    match = re.search(r"-?\d+(?:\.\d+)?", raw)
+    return float(match.group()) if match else None
+
+
+def ingest_match_stats(session: Session, match_url: str, stats: list[dict[str, Any]]) -> list[MatchStat]:
+    match_id = extract_match_id(match_url)
+    match = session.query(Match).filter_by(source="flashscore", external_id=match_id).one_or_none()
+    if match is None:
+        raise ValueError(
+            f"No match with external_id={match_id!r} — run ingest_event for this match before ingest_match_stats"
+        )
+
+    rows: list[MatchStat] = []
+    for entry in stats:
+        label = entry.get("label")
+        if not label:
+            continue
+        stat_name = _slugify_stat_label(label)
+        for side, team_id in (("home", match.home_team_id), ("away", match.away_team_id)):
+            value = _parse_stat_value(entry.get(side))
+            if value is None:
+                continue
+            row = (
+                session.query(MatchStat)
+                .filter_by(match_id=match.id, team_id=team_id, stat_name=stat_name)
+                .one_or_none()
+            )
+            if row is None:
+                row = MatchStat(match_id=match.id, team_id=team_id, stat_name=stat_name)
+                session.add(row)
+            row.value = value
+            session.flush()
+            rows.append(row)
+
+    session.commit()
+    return rows
+
+
+_INCIDENT_STAT_NAMES = {
+    "goal": "goals",
+    "assist": "assists",
+    "yellow_card": "yellow_cards",
+    "red_card": "red_cards",
+}
+
+
+def ingest_match_events(session: Session, match_url: str, incidents: list[dict[str, Any]]) -> list[PlayerMatchStat]:
+    match_id = extract_match_id(match_url)
+    match = session.query(Match).filter_by(source="flashscore", external_id=match_id).one_or_none()
+    if match is None:
+        raise ValueError(
+            f"No match with external_id={match_id!r} — run ingest_event for this match before ingest_match_events"
+        )
+
+    # Pre-aggregate: a player can score twice, so counts (not last-write) matter.
+    counts: dict[tuple[str, str, int], int] = {}  # (player_link, player_name, team_id) -> count
+    for inc in incidents:
+        stat_name = _INCIDENT_STAT_NAMES.get(inc.get("type", ""))
+        if stat_name is None:
+            continue
+        player_link = inc.get("player_link")
+        player_name = inc.get("player_name")
+        if not player_link or not player_name:
+            continue
+        team_id = match.home_team_id if inc.get("side") == "home" else match.away_team_id
+        key = (player_link, stat_name, team_id)
+        counts[key] = counts.get(key, 0) + 1
+
+    rows: list[PlayerMatchStat] = []
+    for (player_link, stat_name, team_id), count in counts.items():
+        player_name = next(
+            inc["player_name"]
+            for inc in incidents
+            if inc.get("player_link") == player_link and inc.get("player_name")
+        )
+        player = session.query(Player).filter_by(source="flashscore", external_id=player_link).one_or_none()
+        if player is None:
+            player = Player(source="flashscore", external_id=player_link, name=player_name)
+            session.add(player)
+            session.flush()
+        elif player.name != player_name:
+            player.name = player_name
+
+        row = (
+            session.query(PlayerMatchStat)
+            .filter_by(match_id=match.id, player_id=player.id, stat_name=stat_name)
+            .one_or_none()
+        )
+        if row is None:
+            row = PlayerMatchStat(match_id=match.id, player_id=player.id, team_id=team_id, stat_name=stat_name)
+            session.add(row)
+        row.team_id = team_id
+        row.value = float(count)
+        session.flush()
+        rows.append(row)
 
     session.commit()
     return rows

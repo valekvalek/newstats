@@ -8,7 +8,13 @@ from pathlib import Path
 import typer
 
 from newstats.db.session import SessionLocal
-from newstats.importer.flashscore import ingest_event, ingest_odds, ingest_standings
+from newstats.importer.flashscore import (
+    ingest_event,
+    ingest_match_events,
+    ingest_match_stats,
+    ingest_odds,
+    ingest_standings,
+)
 from newstats.stats.form import form_summary
 from newstats.stats.head_to_head import head_to_head
 
@@ -69,6 +75,51 @@ def ingest_standings_cmd(
     try:
         rows = ingest_standings(session, url, _read_json(file), when)
         typer.echo(f"ingested {len(rows)} standings row(s)")
+    finally:
+        session.close()
+
+
+@app.command()
+def ingest_stats_cmd(
+    url: str = typer.Argument(..., help="The match URL this team-stats scrape belongs to"),
+    file: Path = typer.Option(None, help="JSON file; defaults to stdin"),  # noqa: B008
+):
+    """
+    Ingest team-level match stats (corners, fouls, possession, ...).
+
+    Not something FlashscoreScraper's CLI exposes -- this expects
+    {"stats": [{"label": "Corner kicks", "home": "2", "away": "5"}, ...]}
+    as produced by scraping a match's own ".../summary/stats/overall/"
+    page directly (see newstats/importer/flashscore.py's module docstring).
+    """
+    session = SessionLocal()
+    try:
+        payload = _read_json(file)
+        rows = ingest_match_stats(session, url, payload.get("stats") or [])
+        typer.echo(f"ingested {len(rows)} stat row(s)")
+    finally:
+        session.close()
+
+
+@app.command()
+def ingest_events_cmd(
+    url: str = typer.Argument(..., help="The match URL this incident-timeline scrape belongs to"),
+    file: Path = typer.Option(None, help="JSON file; defaults to stdin"),  # noqa: B008
+):
+    """
+    Ingest player events (goals, assists, cards) from a match's incident timeline.
+
+    Not something FlashscoreScraper's CLI exposes -- this expects
+    {"incidents": [{"type": "goal", "side": "home", "player_name": "...",
+    "player_link": "/player/.../..."}, ...]} as produced by scraping a
+    match's own summary page directly (see newstats/importer/flashscore.py's
+    module docstring).
+    """
+    session = SessionLocal()
+    try:
+        payload = _read_json(file)
+        rows = ingest_match_events(session, url, payload.get("incidents") or [])
+        typer.echo(f"ingested {len(rows)} player-stat row(s)")
     finally:
         session.close()
 
