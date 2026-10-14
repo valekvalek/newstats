@@ -1,0 +1,20 @@
+{
+  "source": "flashscore",
+  "sport": "football",
+  "tournament": {"external_id": "t1", "name": "Premier League", "country": "England", "season": "2026/27"},
+  "match": {
+    "external_id": "m2",
+    "kickoff_at": "2026-08-08T18:00:00",
+    "round": "Round 2",
+    "status": "finished",
+    "home_team": {"external_id": "a1", "name": "Team B", "country": "England"},
+    "away_team": {"external_id": "h1", "name": "Team A", "country": "England"},
+    "home_score": 0,
+    "away_score": 3,
+    "periods": {"1h": [0, 2], "2h": [0, 1]}
+  },
+  "team_stats": [],
+  "players": [],
+  "player_stats": [],
+  "odds": []
+}

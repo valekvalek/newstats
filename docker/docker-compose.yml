@@ -1,0 +1,14 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: newstats
+      POSTGRES_PASSWORD: newstats
+      POSTGRES_DB: newstats
+    ports:
+      - "5432:5432"
+    volumes:
+      - newstats_pgdata:/var/lib/postgresql/data
+
+volumes:
+  newstats_pgdata:

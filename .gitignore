@@ -1,0 +1,14 @@
+.claude-flow/
+.swarm/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+data/
+*.db
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
