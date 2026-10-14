@@ -212,12 +212,21 @@ def ingest_event(session: Session, match_url: str, event: dict[str, Any], sport_
     return match
 
 
-def ingest_odds(session: Session, odds_result: dict[str, Any], scraped_at: dt.datetime) -> list[Odds]:
+def ingest_odds(session: Session, match_url: str, odds_result: dict[str, Any], scraped_at: dt.datetime) -> list[Odds]:
+    """
+    `match_url` is the URL you ran `event` against for this match, same as
+    every other ingest_* function here -- NOT `odds_result["url"]`. Confirmed
+    live against the real scraper: `FlashscoreUrlBuilder.build_odds_url`
+    strips the `?mid=` query param when it rebuilds the per-odds-type URL, so
+    `odds_result["url"]` almost never carries the same external_id the match
+    was originally ingested under. Deriving the match purely from that field
+    (as an earlier version of this function did) silently failed to find the
+    match on real data despite working against the fixtures.
+    """
     if odds_result.get("error"):
         return []
 
-    base_path = re.sub(r"/odds/[^/?]+", "", odds_result["url"])
-    match_id = extract_match_id(base_path)
+    match_id = extract_match_id(match_url)
     match = session.query(Match).filter_by(source="flashscore", external_id=match_id).one_or_none()
     if match is None:
         raise ValueError(

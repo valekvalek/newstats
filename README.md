@@ -118,18 +118,24 @@ python main.py event "$MATCH_URL" \
   | ( cd /path/to/newstats && newstats ingest-event-cmd "$MATCH_URL" --file /dev/stdin )
 
 python main.py odds "$MATCH_URL" \
-  | ( cd /path/to/newstats && newstats ingest-odds-cmd --file /dev/stdin )
+  | ( cd /path/to/newstats && newstats ingest-odds-cmd "$MATCH_URL" --file /dev/stdin )
 
 python main.py event-info "$MATCH_URL/standings/standings/overall/" \
   | ( cd /path/to/newstats && newstats ingest-standings-cmd "$MATCH_URL" --file /dev/stdin )
 
 newstats form <team_id>
 newstats h2h <team_a_id> <team_b_id>
+newstats predict <home_team_id> <away_team_id>
+newstats value-bets <match_id>
 ```
 
-`ingest-event-cmd` обязателен первым для матча — `ingest-odds-cmd` и
-`ingest-standings-cmd` ищут матч по его `mid` и падают с понятной ошибкой,
-если матч ещё не импортирован.
+`ingest-event-cmd` обязателен первым для матча — остальные `ingest-*-cmd`
+ищут матч по его `mid` и падают с понятной ошибкой, если матч ещё не
+импортирован. **`ingest-odds-cmd` принимает `$MATCH_URL` отдельным
+аргументом, а не берёт его из `odds_result["url"]`** — на реальных данных
+`FlashscoreUrlBuilder.build_odds_url` обрезает `?mid=` при сборке URL под
+конкретный тип коэффициентов, так что этого поля недостаточно, чтобы найти
+матч (подтверждено живым запросом, не только по фикстурам).
 
 ## Тесты
 

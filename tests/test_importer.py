@@ -147,23 +147,33 @@ def test_ingest_event_is_idempotent():
 def test_ingest_odds_requires_existing_match():
     session = _session()
     try:
-        ingest_odds(session, _load("odds_1x2.json"), dt.datetime.now(dt.UTC))
+        ingest_odds(session, MATCH_1_URL, _load("odds_1x2.json"), dt.datetime.now(dt.UTC))
         raised = False
     except ValueError:
         raised = True
     assert raised
 
 
+def test_ingest_odds_ignores_odds_results_own_mid_less_url():
+    """Real scraper output: odds_result["url"] strips ?mid= -- must not be used to find the match."""
+    session = _session()
+    ingest_event(session, MATCH_1_URL, _load("event.json"))
+    odds = _load("odds_1x2.json")
+    odds["url"] = "https://www.flashscore.com/match/football/team-a-AbC123/team-b-XyZ987/odds/1x2-odds"  # no ?mid=
+    rows = ingest_odds(session, MATCH_1_URL, odds, dt.datetime.now(dt.UTC))
+    assert len(rows) == 3
+
+
 def test_ingest_odds_and_movement():
     session = _session()
     ingest_event(session, MATCH_1_URL, _load("event.json"))
     t1 = dt.datetime(2026, 5, 5, 10, 0, tzinfo=dt.UTC)
-    ingest_odds(session, _load("odds_1x2.json"), t1)
+    ingest_odds(session, MATCH_1_URL, _load("odds_1x2.json"), t1)
 
     odds_later = _load("odds_1x2.json")
     odds_later["data"][0]["odds_values"][0]["odds"] = "1.75"
     t2 = dt.datetime(2026, 5, 5, 17, 0, tzinfo=dt.UTC)
-    ingest_odds(session, odds_later, t2)
+    ingest_odds(session, MATCH_1_URL, odds_later, t2)
 
     from newstats.db.models import Match
 
