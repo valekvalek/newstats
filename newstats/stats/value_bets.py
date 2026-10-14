@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 from dataclasses import dataclass
 
 from sqlalchemy import select
@@ -56,6 +57,24 @@ def latest_1x2_odds(session: Session, match_id: int, snapshot: str | None = None
         seen.add(key)
         latest.setdefault(row.bookmaker, {})[selection] = float(row.value)
     return {bm: sels for bm, sels in latest.items() if {"Home", "Draw", "Away"} <= sels.keys()}
+
+
+def snapshot_recorded_at(session: Session, match_id: int, bookmaker: str, snapshot: str) -> dt.datetime | None:
+    """
+    When a specific bookmaker's specific snapshot was actually recorded --
+    needed to call predict_match(..., before=...) at the *snapshot's* time,
+    not the match's kickoff_at, when simulating a bet placed at that
+    snapshot (scripts/simulate_bets.py): the model shouldn't see data from
+    after the bet would actually have been placed, which can be well before
+    kickoff for snapshot="t-24h".
+    """
+    row = session.execute(
+        select(Odds.recorded_at)
+        .where(Odds.match_id == match_id, Odds.market == "1x2-odds", Odds.bookmaker == bookmaker, Odds.snapshot == snapshot)
+        .order_by(Odds.recorded_at.desc())
+        .limit(1)
+    ).scalar()
+    return row
 
 
 def compare_to_market(session: Session, match_id: int, home_team_id: int, away_team_id: int) -> tuple[MatchPrediction | None, list[OddsComparison]]:

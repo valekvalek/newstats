@@ -168,7 +168,7 @@ async def main() -> None:
                 match_errors.append((match_url, err))
                 continue
             try:
-                ingest_event(session, match_url, event)
+                ingest_event(session, match_url, event, source_tz="UTC")  # browser context is pinned to timezone_id="UTC"
                 ingested += 1
             except Exception as e:  # noqa: BLE001
                 match_errors.append((match_url, f"ingest failed: {e}"))

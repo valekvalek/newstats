@@ -168,12 +168,22 @@ def _load_xg_rows(session: Session, before: dt.datetime | None) -> list[_XgRow]:
     return rows
 
 
-#: Fitted-ratings cache, keyed by (before, xi): computing a_i/d_i is an O(n_iter *
-#: n_matches) pass, and a backtest calls this once per match -- but many matches
-#: in our data share an exact kickoff_at (whole CL rounds kick off simultaneously),
-#: so memoizing on the cutoff timestamp avoids redundant refits within one run.
-#: Process-lifetime only; never persisted, never shared across runs.
-_fit_cache: dict[tuple[dt.datetime | None, float], dict[int, tuple[float, float]]] = {}
+#: Fitted-ratings cache, keyed by (id(session), before, xi): computing a_i/d_i
+#: is an O(n_iter * n_matches) pass, and a backtest calls this once per match
+#: -- but many matches in our data share an exact kickoff_at (whole CL rounds
+#: kick off simultaneously), so memoizing on the cutoff timestamp avoids
+#: redundant refits within one run. Process-lifetime only; never persisted,
+#: never shared across runs.
+#:
+#: id(session) is a real caveat, not just a formality: CPython can reuse an
+#: id() after the object it belonged to is garbage-collected, so two
+#: different Session objects that don't overlap in lifetime CAN collide on
+#: the same cache key. Fine for the actual use case here (one script, one
+#: Session, created once and held for the whole run) -- NOT safe if you're
+#: creating many short-lived sessions against different DBs in the same
+#: process (e.g. a test suite); tests/conftest.py's _clear_xg_fit_cache
+#: autouse fixture exists specifically to paper over that there.
+_fit_cache: dict[tuple[int, dt.datetime | None, float], dict[int, tuple[float, float]]] = {}
 
 
 def fit_team_ratings(

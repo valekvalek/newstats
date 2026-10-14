@@ -9,6 +9,16 @@ from collections.abc import Sequence
 OUTCOME_IDX = {"home": 0, "draw": 1, "away": 2}
 
 
+def actual_outcome(home_score: int, away_score: int) -> str:
+    """"home" | "draw" | "away" -- shared so backtest.py and simulate_bets.py
+    don't each keep their own (they used to, with different casing)."""
+    if home_score > away_score:
+        return "home"
+    if home_score < away_score:
+        return "away"
+    return "draw"
+
+
 def brier3(probs: Sequence[float], k: int) -> float:
     """3-outcome Brier score for one prediction: sum of squared errors vs the one-hot actual outcome `k`."""
     return sum((p - (1.0 if i == k else 0.0)) ** 2 for i, p in enumerate(probs))

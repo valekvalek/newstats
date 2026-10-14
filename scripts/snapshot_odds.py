@@ -21,6 +21,11 @@ a persistent DB connection, not a one-shot CI job.
 
 Idempotent: a (match, snapshot window) pair that's already been recorded
 is skipped, so re-running (or overlapping cron ticks) never double-snapshots.
+
+Only scrapes the 1x2 market -- no totals/Over-Under odds, even though the
+backtest scores Over/Under 2.5 predictions. Comparing that prediction
+against a real market price isn't possible yet; this is a known gap, not
+an oversight.
 """
 
 from __future__ import annotations
@@ -36,12 +41,18 @@ sys.path.insert(0, os.environ.get("NEWSTATS_REPO", str(Path(__file__).resolve().
 
 from newstats.db.models import Match, MatchStatus, Odds
 from newstats.db.session import SessionLocal
-from newstats.importer.flashscore import ingest_odds
+from newstats.importer.flashscore import ingest_event, ingest_odds
 
 SCRAPER_REPO = os.environ.get("FLASHSCORE_SCRAPER")
 if not SCRAPER_REPO:
     raise SystemExit("Set FLASHSCORE_SCRAPER to a local clone of M3MONs/FlashscoreScraper")
 SCRAPER_PYTHON = os.environ.get("FLASHSCORE_SCRAPER_PYTHON", str(Path(SCRAPER_REPO) / ".venv" / "bin" / "python"))
+#: This script shells out to FlashscoreScraper's OWN playwright engine (not
+#: scripts/collect_*.py's, which pins timezone_id="UTC") -- its browser
+#: inherits whatever timezone the cron host itself is in. Set this to match
+#: that host, or you'll reproduce the exact kickoff_at bug this project hit
+#: once already (see README "Известные ограничения").
+SNAPSHOT_SOURCE_TZ = os.environ.get("SNAPSHOT_SOURCE_TZ", "UTC")
 
 #: minutes before kickoff; a match becomes eligible for a window once it's
 #: within `target` minutes of kickoff and hasn't been snapshotted for it yet.
@@ -54,11 +65,9 @@ def already_snapshotted(session, match_id: int) -> set[str]:
     return {r[0] for r in rows}
 
 
-def fetch_odds(match_url: str) -> dict | None:
-    """Returns the single 1x2-odds OddsResult dict ingest_odds expects -- NOT the
-    {"event_url":..., "odds":[...]} wrapper `main.py odds` prints to stdout."""
+def _run_scraper(*args: str) -> dict | None:
     result = subprocess.run(
-        [SCRAPER_PYTHON, "main.py", "odds", match_url, "--odds", "1x2-odds", "--engine", "playwright", "--timeout", "20"],
+        [SCRAPER_PYTHON, "main.py", *args, "--engine", "playwright", "--timeout", "20"],
         cwd=SCRAPER_REPO,
         capture_output=True,
         text=True,
@@ -66,15 +75,39 @@ def fetch_odds(match_url: str) -> dict | None:
         check=False,
     )
     if result.returncode != 0 or not result.stdout.strip():
-        print(f"  scraper call failed for {match_url}: {result.stderr[-500:]}")
+        print(f"  scraper call failed ({' '.join(args)}): {result.stderr[-500:]}")
         return None
     try:
-        payload = json.loads(result.stdout)
+        return json.loads(result.stdout)
     except json.JSONDecodeError:
-        print(f"  could not parse scraper output for {match_url}")
+        print(f"  could not parse scraper output ({' '.join(args)})")
+        return None
+
+
+def fetch_odds(match_url: str) -> dict | None:
+    """Returns the single 1x2-odds OddsResult dict ingest_odds expects -- NOT the
+    {"event_url":..., "odds":[...]} wrapper `main.py odds` prints to stdout."""
+    payload = _run_scraper("odds", match_url, "--odds", "1x2-odds")
+    if payload is None:
         return None
     odds_list = payload.get("odds") or []
     return odds_list[0] if odds_list else None
+
+
+def refresh_event(session, m: Match) -> Match:
+    """Re-fetch and re-ingest the match's own event data before snapshotting,
+    so a postponement/kickoff-time change is picked up instead of snapshotting
+    against a stale kickoff_at. Returns the (possibly updated) match; on
+    scrape failure, returns `m` unchanged rather than raising -- a transient
+    failure here shouldn't block snapshotting with the kickoff_at we already have."""
+    event = _run_scraper("event", m.url)
+    if event is None:
+        return m
+    try:
+        return ingest_event(session, m.url, event, source_tz=SNAPSHOT_SOURCE_TZ)
+    except Exception as e:  # noqa: BLE001
+        print(f"  refresh_event failed for match {m.id}: {e}")
+        return m
 
 
 def main() -> None:
@@ -91,20 +124,27 @@ def main() -> None:
 
     taken = 0
     for m in upcoming:
+        m = refresh_event(session, m)
+        if m.kickoff_at is None:
+            continue
         mins_to_kickoff = (m.kickoff_at - now).total_seconds() / 60
         done = already_snapshotted(session, m.id)
 
         for name, target in WINDOWS.items():
             if name in done:
                 continue
-            if not (0 < mins_to_kickoff <= target):
+            # Require we're in the window's own "half-life", not just under its
+            # upper bound -- otherwise a match first seen at e.g. 30 minutes to
+            # kickoff would grab t-24h AND t-1h in the same tick, both stamped
+            # with the same recorded_at despite being 23 hours apart in theory.
+            if not (target / 2 < mins_to_kickoff <= target):
                 continue
 
             print(f"  snapshotting {name} for {m.home_team.name} vs {m.away_team.name} ({mins_to_kickoff:.0f} min to kickoff)")
             odds_result = fetch_odds(m.url)
             if odds_result is None:
                 continue
-            rows = ingest_odds(session, m.url, odds_result, dt.datetime.now(dt.UTC), snapshot=name)
+            rows = ingest_odds(session, m.url, odds_result, dt.datetime.now(dt.UTC).replace(tzinfo=None), snapshot=name)
             print(f"    ingested {len(rows)} odds rows as snapshot={name}")
             taken += 1
 

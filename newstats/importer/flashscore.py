@@ -66,7 +66,6 @@ moment the scrape ran, rather than inventing a field the source doesn't have.
 from __future__ import annotations
 
 import datetime as dt
-import os
 import re
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -150,22 +149,33 @@ def parse_score(score: str | None) -> tuple[int | None, int | None]:
     return int(match.group(1)), int(match.group(2))
 
 
-#: Flashscore renders `event["date"]` in whichever timezone the scraping browser
-#: is in (client-side JS, see README "Известные ограничения") -- not UTC and not
-#: a fixed site-wide zone. Set SOURCE_TZ to match the machine running the
-#: scraper; confirmed live as Europe/Moscow for this project's own scraping host.
-SOURCE_TZ = ZoneInfo(os.environ.get("SOURCE_TZ", "UTC"))
+def parse_kickoff(date_str: str | None, source_tz: dt.tzinfo | str = dt.UTC) -> dt.datetime | None:
+    """
+    '13.10.2026 22:00' in `source_tz` local time -> naive UTC datetime.
 
-
-def parse_kickoff(date_str: str | None) -> dt.datetime | None:
-    """'13.10.2026 22:00' in SOURCE_TZ local time -> naive UTC datetime."""
+    Flashscore renders `event["date"]` in whichever timezone the scraping
+    browser is in (client-side JS, see README "Известные ограничения") --
+    not UTC and not a fixed site-wide zone, so the caller must say what it
+    actually is. Deliberately NOT a global/env-var default: the two things
+    that call this (scripts/collect_*.py, which pin Playwright to
+    timezone_id="UTC", and an ad-hoc run of FlashscoreScraper's own CLI,
+    which doesn't and inherits the host machine's zone) produce dates in
+    different zones, and a single process-wide setting silently mismatched
+    whichever one wasn't the "current" default -- see git history for the
+    bug this replaced. `source_tz="UTC"` is still the right default *for
+    this function*, since both the untouched external scraper's own engine
+    README documents and scripts/collect_*.py explicitly aim for UTC; only
+    an ad-hoc `main.py event` call off a non-UTC-pinned browser needs to
+    pass something else.
+    """
     if not date_str:
         return None
     try:
         naive_local = dt.datetime.strptime(date_str.strip(), "%d.%m.%Y %H:%M")
     except ValueError:
         return None
-    return naive_local.replace(tzinfo=SOURCE_TZ).astimezone(dt.UTC).replace(tzinfo=None)
+    tz = ZoneInfo(source_tz) if isinstance(source_tz, str) else source_tz
+    return naive_local.replace(tzinfo=tz).astimezone(dt.UTC).replace(tzinfo=None)
 
 
 def extract_match_id(match_url: str) -> str:
@@ -216,7 +226,18 @@ def _get_or_create_team(session: Session, sport: Sport, external_id: str, name: 
     return team
 
 
-def ingest_event(session: Session, match_url: str, event: dict[str, Any], sport_name: str = "football") -> Match:
+def ingest_event(
+    session: Session,
+    match_url: str,
+    event: dict[str, Any],
+    sport_name: str = "football",
+    source_tz: dt.tzinfo | str = dt.UTC,
+) -> Match:
+    """
+    `source_tz` is the timezone `event["date"]` is actually in -- see
+    parse_kickoff's docstring. Pass it explicitly; don't rely on the default
+    unless you know the page was scraped by a browser pinned to UTC.
+    """
     sport = _get_or_create_sport(session, sport_name)
     tournament = _get_or_create_tournament(session, sport, event.get("league"))
 
@@ -244,7 +265,7 @@ def ingest_event(session: Session, match_url: str, event: dict[str, Any], sport_
     match.status_raw = event.get("detail_status")
     match.status = normalize_status(event.get("detail_status"))
     match.home_score, match.away_score = parse_score(event.get("score"))
-    match.kickoff_at = parse_kickoff(event.get("date"))
+    match.kickoff_at = parse_kickoff(event.get("date"), source_tz=source_tz)
     session.commit()
     return match
 

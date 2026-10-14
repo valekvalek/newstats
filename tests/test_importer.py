@@ -72,29 +72,26 @@ def test_is_penalty_decided():
 
 
 def test_parse_kickoff():
-    # Default SOURCE_TZ is UTC (no SOURCE_TZ env var set in tests), so this is an identity conversion.
+    # Default source_tz is UTC, so this is an identity conversion.
     assert parse_kickoff("13.10.2026 22:00") == dt.datetime(2026, 10, 13, 22, 0)
     assert parse_kickoff(None) is None
     assert parse_kickoff("not a date") is None
 
 
 def test_parse_kickoff_converts_source_tz_to_utc():
-    from zoneinfo import ZoneInfo
-
-    import newstats.importer.flashscore as flashscore_module
-
-    original = flashscore_module.SOURCE_TZ
-    try:
-        flashscore_module.SOURCE_TZ = ZoneInfo("Europe/Moscow")  # UTC+3, no DST
-        assert flashscore_module.parse_kickoff("13.10.2026 22:00") == dt.datetime(2026, 10, 13, 19, 0)
-    finally:
-        flashscore_module.SOURCE_TZ = original
+    assert parse_kickoff("13.10.2026 22:00", source_tz="Europe/Moscow") == dt.datetime(2026, 10, 13, 19, 0)  # UTC+3, no DST
 
 
 def test_ingest_event_sets_kickoff_at():
     session = _session()
     match = ingest_event(session, MATCH_1_URL, _load("event.json"))
     assert match.kickoff_at == dt.datetime(2026, 5, 5, 18, 0)
+
+
+def test_ingest_event_passes_through_source_tz():
+    session = _session()
+    match = ingest_event(session, MATCH_1_URL, _load("event.json"), source_tz="Europe/Moscow")
+    assert match.kickoff_at == dt.datetime(2026, 5, 5, 15, 0)  # 18:00 MSK (UTC+3) -> 15:00 UTC
 
 
 def test_ingest_match_stats_requires_existing_match():

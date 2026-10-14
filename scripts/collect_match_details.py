@@ -6,11 +6,17 @@ page (incident timeline) and its ".../summary/stats/overall/" sub-page
 directly with Playwright + BeautifulSoup -- FlashscoreScraper's CLI has no
 concept of either, see newstats/importer/flashscore.py's module docstring.
 
+By default only fetches matches that don't have team stats yet (no
+MatchStat row at all for them) -- re-scraping all 300+ matches on every
+run is slow and pointless once they're already populated. Pass --all to
+force a full refresh (e.g. after a parsing-logic change).
+
 Run from the repo root: DATABASE_URL=... .venv/bin/python scripts/collect_match_details.py
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import os
 import re
@@ -23,7 +29,7 @@ sys.path.insert(0, NEWSTATS_REPO)
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 
-from newstats.db.models import Match
+from newstats.db.models import Match, MatchStat
 from newstats.db.session import SessionLocal
 from newstats.importer.flashscore import (
     ingest_match_events,
@@ -153,9 +159,20 @@ async def fetch_match_details(context, sem, match_id: int, match_url: str) -> di
     return {"match_id": match_id, "kickoff_raw": kickoff_raw, "incidents": incidents, "stats": stats, "error": None}
 
 
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--all", action="store_true", help="Re-fetch every match, including ones that already have stats")
+    return p.parse_args()
+
+
 async def main() -> None:
+    args = parse_args()
     session = SessionLocal()
-    matches = session.query(Match).all()
+    query = session.query(Match)
+    if not args.all:
+        already_done = {row[0] for row in session.query(MatchStat.match_id).distinct()}
+        query = query.filter(~Match.id.in_(already_done)) if already_done else query
+    matches = query.all()
     targets = [(m.id, build_match_url(m)) for m in matches]
     session.close()
 
@@ -178,7 +195,7 @@ async def main() -> None:
                 continue
             try:
                 m = session.query(Match).filter_by(id=mid).one()
-                kickoff = parse_kickoff(r.get("kickoff_raw"))
+                kickoff = parse_kickoff(r.get("kickoff_raw"), source_tz="UTC")  # browser context is pinned to timezone_id="UTC"
                 if kickoff:
                     m.kickoff_at = kickoff
                     session.commit()

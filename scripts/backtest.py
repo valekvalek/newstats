@@ -5,10 +5,17 @@ DB, using only data that existed before each match kicked off
 strength numbers never include the match being predicted or anything after
 it.
 
-Only MatchStatus.FINISHED matches are scored, and penalty-shootout matches
-are excluded (status_raw "After 90 minutes" -- the stored score is the
-pre-shootout score, so the 1X2 outcome it implies can be wrong; see
-README "Известные ограничения" / is_penalty_decided).
+Only matches with status_raw == "Finished" (plain 90-minute result) are
+scored for 1X2 purposes -- NOT every MatchStatus.FINISHED match. The 1X2
+market settles on the 90-minute score, and:
+  - "After 90 minutes" (decided by penalties with no extra time) -- the
+    stored score IS the 90-minute score, so it's actually fine for 1X2;
+    excluded anyway for simplicity, it's a single match on current data.
+  - "After Extra Time" -- the stored score is the full 120-minute result,
+    which does NOT represent the 90-minute 1X2 outcome and can't be
+    converted back to one (we don't scrape a separate 90'-mark score).
+    This one genuinely must be excluded, not just "could be".
+See README "Известные ограничения".
 
 Early matches for a team (the first one or two in our "last 10" sample)
 will often have little or no prior history and get skipped -- that's
@@ -38,18 +45,15 @@ sys.path.insert(0, os.environ.get("NEWSTATS_REPO", str(Path(__file__).resolve().
 
 from newstats.db.models import Match, MatchStatus
 from newstats.db.session import SessionLocal
-from newstats.importer.flashscore import is_penalty_decided
-from newstats.stats.metrics import OUTCOME_IDX, bootstrap_ci, brier3, logloss3
+from newstats.stats.metrics import (
+    OUTCOME_IDX,
+    actual_outcome,
+    bootstrap_ci,
+    brier3,
+    logloss3,
+)
 from newstats.stats.value_bets import latest_1x2_odds
 from newstats.stats.xg_model import devig_1x2, predict_match, predict_match_fitted
-
-
-def actual_outcome(home_score: int, away_score: int) -> str:
-    if home_score > away_score:
-        return "home"
-    if home_score < away_score:
-        return "away"
-    return "draw"
 
 
 def market_probs(session, match_id: int) -> tuple[float, float, float] | None:
@@ -63,21 +67,23 @@ def market_probs(session, match_id: int) -> tuple[float, float, float] | None:
 
 def load_matches(session, since: str | None = None, until: str | None = None) -> list[Match]:
     """
-    FINISHED matches with a score and a kickoff time, excluding penalty-shootout
-    matches (is_penalty_decided) -- the actual filtering logic scripts/backtest.py
-    runs on, pulled out so it's testable without going through main()/argparse.
-    `since`/`until` are "YYYY-MM-DD" strings, same as the CLI flags.
+    Matches with status_raw == "Finished" (plain 90-minute result, no ET/pens --
+    see module docstring for why that's the right filter for 1X2 purposes, not
+    MatchStatus.FINISHED) with a score and a kickoff time -- the actual
+    filtering logic scripts/backtest.py runs on, pulled out so it's testable
+    without going through main()/argparse. `since`/`until` are "YYYY-MM-DD"
+    strings, same as the CLI flags.
     """
     q = session.query(Match).filter(
         Match.kickoff_at.isnot(None),
         Match.home_score.isnot(None),
-        Match.status == MatchStatus.FINISHED,
+        Match.status_raw == "Finished",
     )
     if since:
         q = q.filter(Match.kickoff_at >= dt.datetime.strptime(since, "%Y-%m-%d"))
     if until:
         q = q.filter(Match.kickoff_at < dt.datetime.strptime(until, "%Y-%m-%d"))
-    return [m for m in q.order_by(Match.kickoff_at).all() if not is_penalty_decided(m.status_raw)]
+    return q.order_by(Match.kickoff_at).all()
 
 
 def parse_args() -> argparse.Namespace:
@@ -108,10 +114,13 @@ def main() -> None:
         q_unfiltered = q_unfiltered.filter(Match.kickoff_at >= dt.datetime.strptime(args.since, "%Y-%m-%d"))
     if args.until:
         q_unfiltered = q_unfiltered.filter(Match.kickoff_at < dt.datetime.strptime(args.until, "%Y-%m-%d"))
-    pens_excluded = q_unfiltered.count() - len(matches)
+    non_90min_excluded = q_unfiltered.count() - len(matches)
     min_date = matches[0].kickoff_at.date() if matches else dt.date.today()
 
-    print(f"--- backtesting {len(matches)} FINISHED matches (pre-match data only; {pens_excluded} penalty-shootout matches excluded) ---\n")
+    print(
+        f"--- backtesting {len(matches)} plain-90-minute FINISHED matches "
+        f"(pre-match data only; {non_90min_excluded} ET/penalty-decided matches excluded) ---\n"
+    )
 
     skipped = 0
     hits: list[float] = []

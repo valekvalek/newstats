@@ -4,7 +4,7 @@ from backtest import load_matches
 from conftest import make_session as _session
 
 from newstats.importer.flashscore import ingest_event
-from newstats.stats.metrics import bootstrap_ci, brier3, logloss3
+from newstats.stats.metrics import actual_outcome, bootstrap_ci, brier3, logloss3
 
 
 def _event(date: str, home: str, away: str, score: str, status: str) -> dict:
@@ -18,6 +18,12 @@ def _event(date: str, home: str, away: str, score: str, status: str) -> dict:
         "detail_status": status,
         "league": {"name": "Test League", "link": "/test/league/"},
     }
+
+
+def test_actual_outcome():
+    assert actual_outcome(2, 1) == "home"
+    assert actual_outcome(1, 2) == "away"
+    assert actual_outcome(1, 1) == "draw"
 
 
 def test_brier3_perfect_prediction_is_zero():
@@ -49,7 +55,11 @@ def test_bootstrap_ci_is_narrower_for_larger_samples():
     assert (hi_l - lo_l) < (hi_s - lo_s)
 
 
-def test_load_matches_filters_status_and_penalty_shootouts():
+def test_load_matches_only_plain_90_minute_results():
+    """status_raw == "Finished" only -- NOT MatchStatus.FINISHED. Both "After
+    Extra Time" (score is the 120-minute result, not what the 1X2 market
+    settles on) and "After 90 minutes" (penalty shootout) must be excluded,
+    even though both are MatchStatus.FINISHED in the DB."""
     session = _session()
     ingest_event(session, "https://fs.test/finished?mid=finished", _event("13.10.2026 20:00", "A", "B", "2-1", "Finished"))
     ingest_event(session, "https://fs.test/scheduled?mid=scheduled", _event("20.10.2026 20:00", "C", "D", "-", ""))
@@ -57,9 +67,8 @@ def test_load_matches_filters_status_and_penalty_shootouts():
     ingest_event(session, "https://fs.test/et?mid=et", _event("13.10.2026 20:00", "G", "H", "3-1", "After Extra Time"))
 
     matches = load_matches(session)
-    statuses_raw = {m.status_raw for m in matches}
-    assert statuses_raw == {"Finished", "After Extra Time"}  # not the scheduled one, not the penalty-decided one
-    assert len(matches) == 2
+    assert {m.status_raw for m in matches} == {"Finished"}
+    assert len(matches) == 1
 
 
 def test_load_matches_since_until_range():

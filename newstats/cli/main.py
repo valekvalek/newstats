@@ -38,11 +38,14 @@ def ingest_event_cmd(
     url: str = typer.Argument(..., help="The match URL you ran `event` against"),
     file: Path = typer.Option(None, help="JSON file; defaults to stdin"),  # noqa: B008
     sport: str = typer.Option("football", help="Sport slug"),
+    source_tz: str = typer.Option(
+        "UTC", help="Timezone event['date'] is actually in -- 'UTC' if scraped by a browser pinned to timezone_id='UTC', otherwise the scraping host's own zone"
+    ),
 ):
     """Ingest the output of: python main.py event <url>"""
     session = SessionLocal()
     try:
-        match = ingest_event(session, url, _read_json(file), sport_name=sport)
+        match = ingest_event(session, url, _read_json(file), sport_name=sport, source_tz=source_tz)
         typer.echo(f"match id={match.id} external_id={match.external_id} status={match.status.value}")
     finally:
         session.close()
