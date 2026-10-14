@@ -1,0 +1,17 @@
+{
+  "url": "https://www.flashscore.com/match/football/team-a-AbC123/team-b-XyZ987/odds/1x2-odds?mid=U7CL8Og5",
+  "odd_type": "1x2-odds",
+  "data": [
+    {
+      "bookmaker_id": "2",
+      "bookmaker_name": "Bet365",
+      "bookmaker_link": "/bookmaker/2",
+      "odds_values": [
+        {"value": "1", "type": "Home", "odds": "1.85"},
+        {"value": "X", "type": "Draw", "odds": "3.40"},
+        {"value": "2", "type": "Away", "odds": "4.20"}
+      ]
+    }
+  ],
+  "error": null
+}

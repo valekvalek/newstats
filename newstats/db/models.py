@@ -32,11 +32,20 @@ from newstats.db.base import Base
 
 
 class MatchStatus(str, enum.Enum):
+    """
+    Normalized bucket. The scraper's own `detail_status` is free text
+    ("Finished", "After Pen.", "Postp.", ...) and keeps changing wording per
+    sport/locale, so it is kept verbatim in `Match.status_raw` and mapped
+    into this small fixed set via `newstats.importer.flashscore.normalize_status`
+    rather than trusted directly — an unmapped bucket must not look FINISHED.
+    """
+
     SCHEDULED = "scheduled"
     LIVE = "live"
     FINISHED = "finished"
     POSTPONED = "postponed"
     CANCELLED = "cancelled"
+    UNKNOWN = "unknown"
 
 
 class ExternalMixin:
@@ -122,8 +131,9 @@ class Match(ExternalMixin, Base):
     kickoff_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     round: Mapped[str | None] = mapped_column(String(64), nullable=True)
     status: Mapped[MatchStatus] = mapped_column(
-        Enum(MatchStatus, name="match_status"), default=MatchStatus.SCHEDULED
+        Enum(MatchStatus, name="match_status"), default=MatchStatus.UNKNOWN
     )
+    status_raw: Mapped[str | None] = mapped_column(String(64), nullable=True)
     home_score: Mapped[int | None] = mapped_column(nullable=True)
     away_score: Mapped[int | None] = mapped_column(nullable=True)
     periods: Mapped[dict | None] = mapped_column(JSON, nullable=True)
@@ -167,6 +177,34 @@ class PlayerMatchStat(Base):
 
     match: Mapped[Match] = relationship(back_populates="player_stats")
     player: Mapped[Player] = relationship()
+    team: Mapped[Team] = relationship()
+
+
+class Standing(Base):
+    """
+    One team's row in a tournament's league table at the time it was
+    scraped. Flashscore's "standings" tab is a snapshot, not a time series
+    the scraper exposes per-round — so this is upserted per (tournament,
+    team) and simply reflects the latest scrape, not history.
+    """
+
+    __tablename__ = "standings"
+    __table_args__ = (UniqueConstraint("tournament_id", "team_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    tournament_id: Mapped[int] = mapped_column(ForeignKey("tournaments.id"))
+    team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"))
+    rank: Mapped[int | None] = mapped_column(nullable=True)
+    played: Mapped[int | None] = mapped_column(nullable=True)
+    wins: Mapped[int | None] = mapped_column(nullable=True)
+    draws: Mapped[int | None] = mapped_column(nullable=True)
+    losses: Mapped[int | None] = mapped_column(nullable=True)
+    goals_for: Mapped[int | None] = mapped_column(nullable=True)
+    goals_against: Mapped[int | None] = mapped_column(nullable=True)
+    points: Mapped[int | None] = mapped_column(nullable=True)
+    scraped_at: Mapped[dt.datetime] = mapped_column(DateTime)
+
+    tournament: Mapped[Tournament] = relationship()
     team: Mapped[Team] = relationship()
 
 

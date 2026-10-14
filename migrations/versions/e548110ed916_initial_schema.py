@@ -1,8 +1,8 @@
 """initial schema
 
-Revision ID: 1b4ed3aa63d4
+Revision ID: e548110ed916
 Revises: 
-Create Date: 2026-10-14 09:53:25.001915
+Create Date: 2026-10-14 10:02:54.509972
 
 """
 from collections.abc import Sequence
@@ -10,7 +10,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = '1b4ed3aa63d4'
+revision: str = 'e548110ed916'
 down_revision: str | None = None
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
@@ -64,7 +64,8 @@ def upgrade() -> None:
     sa.Column('away_team_id', sa.Integer(), nullable=False),
     sa.Column('kickoff_at', sa.DateTime(), nullable=True),
     sa.Column('round', sa.String(length=64), nullable=True),
-    sa.Column('status', sa.Enum('SCHEDULED', 'LIVE', 'FINISHED', 'POSTPONED', 'CANCELLED', name='match_status'), nullable=False),
+    sa.Column('status', sa.Enum('SCHEDULED', 'LIVE', 'FINISHED', 'POSTPONED', 'CANCELLED', 'UNKNOWN', name='match_status'), nullable=False),
+    sa.Column('status_raw', sa.String(length=64), nullable=True),
     sa.Column('home_score', sa.Integer(), nullable=True),
     sa.Column('away_score', sa.Integer(), nullable=True),
     sa.Column('periods', sa.JSON(), nullable=True),
@@ -86,6 +87,24 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['player_id'], ['players.id'], ),
     sa.ForeignKeyConstraint(['team_id'], ['teams.id'], ),
     sa.PrimaryKeyConstraint('id')
+    )
+    op.create_table('standings',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('tournament_id', sa.Integer(), nullable=False),
+    sa.Column('team_id', sa.Integer(), nullable=False),
+    sa.Column('rank', sa.Integer(), nullable=True),
+    sa.Column('played', sa.Integer(), nullable=True),
+    sa.Column('wins', sa.Integer(), nullable=True),
+    sa.Column('draws', sa.Integer(), nullable=True),
+    sa.Column('losses', sa.Integer(), nullable=True),
+    sa.Column('goals_for', sa.Integer(), nullable=True),
+    sa.Column('goals_against', sa.Integer(), nullable=True),
+    sa.Column('points', sa.Integer(), nullable=True),
+    sa.Column('scraped_at', sa.DateTime(), nullable=False),
+    sa.ForeignKeyConstraint(['team_id'], ['teams.id'], ),
+    sa.ForeignKeyConstraint(['tournament_id'], ['tournaments.id'], ),
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('tournament_id', 'team_id')
     )
     op.create_table('match_stats',
     sa.Column('id', sa.Integer(), nullable=False),
@@ -130,6 +149,7 @@ def downgrade() -> None:
     op.drop_table('player_match_stats')
     op.drop_table('odds')
     op.drop_table('match_stats')
+    op.drop_table('standings')
     op.drop_table('player_teams')
     op.drop_table('matches')
     op.drop_table('tournaments')

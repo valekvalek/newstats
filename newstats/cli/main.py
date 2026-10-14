@@ -1,36 +1,76 @@
 from __future__ import annotations
 
-import os
+import datetime as dt
+import json
+import sys
 from pathlib import Path
 
 import typer
 
 from newstats.db.session import SessionLocal
-from newstats.importer.loader import load_directory
+from newstats.importer.flashscore import ingest_event, ingest_odds, ingest_standings
 from newstats.stats.form import form_summary
 from newstats.stats.head_to_head import head_to_head
 
-app = typer.Typer(help="Own stats DB + analysis, fed by an external scraper's JSON output.")
+app = typer.Typer(
+    help=(
+        "Own stats DB + betting-analysis stats, fed by piping "
+        "M3MONs/FlashscoreScraper's JSON output in."
+    )
+)
+
+
+def _read_json(file: Path | None) -> dict:
+    raw = file.read_text() if file else sys.stdin.read()
+    return json.loads(raw)
 
 
 @app.command()
-def import_data(
-    directory: Path = typer.Option(  # noqa: B008  (standard Typer idiom)
-        None, help="Defaults to $SCRAPER_OUTPUT_DIR from .env"
-    )
+def ingest_event_cmd(
+    url: str = typer.Argument(..., help="The match URL you ran `event` against"),
+    file: Path = typer.Option(None, help="JSON file; defaults to stdin"),  # noqa: B008
+    sport: str = typer.Option("football", help="Sport slug"),
 ):
-    """Import every *.json fixture the scraper has written into our DB."""
-    target = directory or Path(os.environ.get("SCRAPER_OUTPUT_DIR", "./data/scraper_output"))
-    if not target.exists():
-        typer.echo(f"No such directory: {target}")
-        raise typer.Exit(1)
-
+    """Ingest the output of: python main.py event <url>"""
     session = SessionLocal()
     try:
-        count = load_directory(session, target)
+        match = ingest_event(session, url, _read_json(file), sport_name=sport)
+        typer.echo(f"match id={match.id} external_id={match.external_id} status={match.status.value}")
     finally:
         session.close()
-    typer.echo(f"Imported {count} match file(s) from {target}")
+
+
+@app.command()
+def ingest_odds_cmd(
+    file: Path = typer.Option(None, help="JSON file; defaults to stdin"),  # noqa: B008
+    scraped_at: str = typer.Option(
+        None, help="ISO timestamp for when this scrape ran; defaults to now"
+    ),
+):
+    """Ingest the output of: python main.py odds <url> (one call per odds type)."""
+    when = dt.datetime.fromisoformat(scraped_at) if scraped_at else dt.datetime.now(dt.UTC)
+    session = SessionLocal()
+    try:
+        rows = ingest_odds(session, _read_json(file), when)
+        typer.echo(f"ingested {len(rows)} odds row(s)")
+    finally:
+        session.close()
+
+
+@app.command()
+def ingest_standings_cmd(
+    url: str = typer.Argument(..., help="The match URL the standings page belongs to"),
+    file: Path = typer.Option(None, help="JSON file; defaults to stdin"),  # noqa: B008
+    scraped_at: str = typer.Option(None, help="ISO timestamp; defaults to now"),
+):
+    """Ingest the output of: python main.py event-info <url>/standings/standings/overall/"""
+    when = dt.datetime.fromisoformat(scraped_at) if scraped_at else dt.datetime.now(dt.UTC)
+    session = SessionLocal()
+    try:
+        rows = ingest_standings(session, url, _read_json(file), when)
+        typer.echo(f"ingested {len(rows)} standings row(s)")
+    finally:
+        session.close()
 
 
 @app.command()

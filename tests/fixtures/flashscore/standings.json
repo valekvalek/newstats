@@ -1,0 +1,18 @@
+{
+  "info_type": "standings",
+  "data": [
+    {
+      "rank": 1, "promotion_status": null, "team": "Team A", "team_url": "/team/team-a-AbC123/",
+      "matches_played": "10", "wins": "7", "draws": "2", "losses": "1",
+      "goals_for": "20", "goals_against": "8", "goal_difference": "+12", "points": "23",
+      "form": [{"result": "W", "match_url": null}], "highlighted": false
+    },
+    {
+      "rank": 2, "promotion_status": null, "team": "Team B", "team_url": "/team/team-b-XyZ987/",
+      "matches_played": "10", "wins": "5", "draws": "3", "losses": "2",
+      "goals_for": "15", "goals_against": "10", "goal_difference": "+5", "points": "18",
+      "form": [{"result": "D", "match_url": null}], "highlighted": false
+    }
+  ],
+  "metadata": {}
+}

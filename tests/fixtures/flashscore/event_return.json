@@ -1,0 +1,10 @@
+{
+  "date": "12.05.2026 18:00",
+  "participants": [
+    {"role": "home", "name": "Team B", "img": null, "link": "/team/team-b-XyZ987/"},
+    {"role": "away", "name": "Team A", "img": null, "link": "/team/team-a-AbC123/"}
+  ],
+  "score": "0 - 3",
+  "detail_status": "Finished",
+  "league": {"name": "Premier League", "link": "/football/england/premier-league/"}
+}

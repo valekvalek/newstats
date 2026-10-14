@@ -1,0 +1,286 @@
+"""
+Adapter for the real output of M3MONs/FlashscoreScraper
+(https://github.com/M3MONs/FlashscoreScraper), confirmed against its source
+(models/event_data.py, models/odds_parser_row.py,
+models/event_info/football_event_info.py as of 2026-10).
+
+That tool is a per-URL CLI, invoked three separate ways per match, each
+printing one JSON object to stdout — it does not batch multiple matches into
+one file and does not write files itself:
+
+  python main.py event      <match_url>   -> EventData
+  python main.py odds       <match_url>   -> OddsResult   (one call per odds type)
+  python main.py event-info <match_url>/standings/standings/overall/  -> EventInfoData
+  python main.py event-info <match_url>/draw/                         -> EventInfoData
+
+It has no concept of players or team-level in-match stats (possession,
+corners, ...) — those fields simply don't exist in this source. It also
+never emits a stable numeric match id as a JSON field: the id lives in the
+match URL's `?mid=` query parameter (or, for older links, in the URL path),
+so `match_external_id` below extracts it from the URL you scraped, not from
+the JSON body.
+
+Real shapes (field names and nesting as the dataclasses actually serialize):
+
+EventData (the `event` command):
+{
+  "date": "05.05.2026 18:00",
+  "participants": [
+    {"role": "home", "name": "Team A", "img": "...", "link": "/team/team-a-AbC123/"},
+    {"role": "away", "name": "Team B", "img": "...", "link": "/team/team-b-XyZ987/"}
+  ],
+  "score": "2 - 1",
+  "detail_status": "Finished",
+  "league": {"name": "Premier League", "link": "/football/england/premier-league/"}
+}
+
+OddsResult (the `odds` command, one call per odds type e.g. "1x2-odds"):
+{
+  "url": "https://www.flashscore.com/match/football/team-a-.../team-b-.../odds/1x2-odds?mid=...",
+  "odd_type": "1x2-odds",
+  "data": [
+    {"bookmaker_id": "2", "bookmaker_name": "Bet365", "bookmaker_link": "...",
+     "odds_values": [{"value": "1", "type": "Home", "odds": "1.85"}, ...]}
+  ],
+  "error": null
+}
+
+EventInfoData (the `event-info` command, standings variant):
+{
+  "info_type": "standings",
+  "data": [
+    {"rank": 1, "promotion_status": null, "team": "Team A", "team_url": "/team/team-a-AbC123/",
+     "matches_played": "10", "wins": "7", "draws": "2", "losses": "1",
+     "goals_for": "20", "goals_against": "8", "goal_difference": "+12", "points": "23",
+     "form": [{"result": "W", "match_url": "..."}], "highlighted": false}
+  ],
+  "metadata": {}
+}
+
+The scraper never timestamps its own output — a quote or a standings row is
+only ever "what the page showed when we scraped it" — so every ingest
+function here takes an explicit `scraped_at`, supplied by the caller at the
+moment the scrape ran, rather than inventing a field the source doesn't have.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import re
+from typing import Any
+from urllib.parse import parse_qs, urlparse
+
+from sqlalchemy.orm import Session
+
+from newstats.db.models import (
+    Match,
+    MatchStatus,
+    Odds,
+    Sport,
+    Standing,
+    Team,
+    Tournament,
+)
+
+_STATUS_MAP: dict[str, MatchStatus] = {
+    "finished": MatchStatus.FINISHED,
+    "after pen.": MatchStatus.FINISHED,
+    "after et": MatchStatus.FINISHED,
+    "postponed": MatchStatus.POSTPONED,
+    "postp.": MatchStatus.POSTPONED,
+    "cancelled": MatchStatus.CANCELLED,
+    "canceled": MatchStatus.CANCELLED,
+    "abandoned": MatchStatus.CANCELLED,
+    "awaiting updates": MatchStatus.SCHEDULED,
+    "scheduled": MatchStatus.SCHEDULED,
+}
+
+_SCORE_RE = re.compile(r"(\d+)\s*-\s*(\d+)")
+
+
+def normalize_status(detail_status: str | None) -> MatchStatus:
+    if not detail_status:
+        return MatchStatus.UNKNOWN
+    key = detail_status.strip().lower()
+    if key in _STATUS_MAP:
+        return _STATUS_MAP[key]
+    if "live" in key or re.fullmatch(r"\d{1,3}'?", key):
+        return MatchStatus.LIVE
+    return MatchStatus.UNKNOWN
+
+
+def parse_score(score: str | None) -> tuple[int | None, int | None]:
+    """'2 - 1' -> (2, 1). Anything else (e.g. 'Awaiting updates') -> (None, None)."""
+    if not score:
+        return None, None
+    match = _SCORE_RE.search(score)
+    if not match:
+        return None, None
+    return int(match.group(1)), int(match.group(2))
+
+
+def extract_match_id(match_url: str) -> str:
+    """
+    Prefer the `mid` query param (the real Flashscore match id, present on
+    links copied from the site). Fall back to the URL path with any
+    trailing sub-page (odds/..., draw/, standings/...) stripped, for the
+    rare link that lacks `mid` — still stable across re-scrapes of the same
+    match, just less canonical than the real id.
+    """
+    parsed = urlparse(match_url)
+    mid = parse_qs(parsed.query).get("mid")
+    if mid:
+        return mid[0]
+    path = parsed.path.rstrip("/")
+    path = re.sub(r"/(odds/[^/]+|draw|standings(/.*)?)$", "", path)
+    return path
+
+
+def _get_or_create_sport(session: Session, name: str) -> Sport:
+    sport = session.query(Sport).filter_by(name=name).one_or_none()
+    if sport is None:
+        sport = Sport(name=name)
+        session.add(sport)
+        session.flush()
+    return sport
+
+
+def _get_or_create_tournament(session: Session, sport: Sport, league: dict[str, Any] | None) -> Tournament:
+    link = (league or {}).get("link") or "unknown-league"
+    name = (league or {}).get("name") or "Unknown league"
+    tournament = session.query(Tournament).filter_by(source="flashscore", external_id=link).one_or_none()
+    if tournament is None:
+        tournament = Tournament(source="flashscore", external_id=link, sport_id=sport.id, name=name)
+        session.add(tournament)
+        session.flush()
+    return tournament
+
+
+def _get_or_create_team(session: Session, sport: Sport, external_id: str, name: str) -> Team:
+    team = session.query(Team).filter_by(source="flashscore", external_id=external_id).one_or_none()
+    if team is None:
+        team = Team(source="flashscore", external_id=external_id, sport_id=sport.id, name=name)
+        session.add(team)
+        session.flush()
+    elif team.name != name:
+        team.name = name  # sites rename/re-slug teams occasionally; keep the latest
+    return team
+
+
+def ingest_event(session: Session, match_url: str, event: dict[str, Any], sport_name: str = "football") -> Match:
+    sport = _get_or_create_sport(session, sport_name)
+    tournament = _get_or_create_tournament(session, sport, event.get("league"))
+
+    participants = {p["role"]: p for p in event["participants"]}
+    home_ref, away_ref = participants["home"], participants["away"]
+    home_team = _get_or_create_team(session, sport, home_ref["link"], home_ref["name"])
+    away_team = _get_or_create_team(session, sport, away_ref["link"], away_ref["name"])
+
+    match_id = extract_match_id(match_url)
+    match = session.query(Match).filter_by(source="flashscore", external_id=match_id).one_or_none()
+    if match is None:
+        match = Match(
+            source="flashscore",
+            external_id=match_id,
+            tournament_id=tournament.id,
+            home_team_id=home_team.id,
+            away_team_id=away_team.id,
+        )
+        session.add(match)
+
+    match.tournament_id = tournament.id
+    match.home_team_id = home_team.id
+    match.away_team_id = away_team.id
+    match.status_raw = event.get("detail_status")
+    match.status = normalize_status(event.get("detail_status"))
+    match.home_score, match.away_score = parse_score(event.get("score"))
+    session.commit()
+    return match
+
+
+def ingest_odds(session: Session, odds_result: dict[str, Any], scraped_at: dt.datetime) -> list[Odds]:
+    if odds_result.get("error"):
+        return []
+
+    base_path = re.sub(r"/odds/[^/?]+", "", odds_result["url"])
+    match_id = extract_match_id(base_path)
+    match = session.query(Match).filter_by(source="flashscore", external_id=match_id).one_or_none()
+    if match is None:
+        raise ValueError(
+            f"No match with external_id={match_id!r} — run ingest_event for this match before ingest_odds"
+        )
+
+    market = odds_result["odd_type"]
+    rows: list[Odds] = []
+    for bookmaker_row in odds_result.get("data") or []:
+        for value in bookmaker_row["odds_values"]:
+            try:
+                price = float(value["odds"])
+            except (TypeError, ValueError):
+                continue
+            row = Odds(
+                match_id=match.id,
+                bookmaker=bookmaker_row["bookmaker_name"],
+                market=market,
+                selection=value["type"],
+                value=price,
+                recorded_at=scraped_at,
+            )
+            session.add(row)
+            rows.append(row)
+    session.commit()
+    return rows
+
+
+def ingest_standings(
+    session: Session, match_url: str, event_info: dict[str, Any], scraped_at: dt.datetime
+) -> list[Standing]:
+    if event_info.get("info_type") != "standings":
+        raise ValueError(f"expected info_type='standings', got {event_info.get('info_type')!r}")
+
+    match_id = extract_match_id(match_url)
+    match = session.query(Match).filter_by(source="flashscore", external_id=match_id).one_or_none()
+    if match is None:
+        raise ValueError(
+            f"No match with external_id={match_id!r} — run ingest_event for this match before ingest_standings"
+        )
+    tournament = match.tournament
+    sport = tournament.sport
+
+    def _int(value: Any) -> int | None:
+        try:
+            return int(str(value).strip())
+        except (TypeError, ValueError):
+            return None
+
+    rows: list[Standing] = []
+    for entry in event_info.get("data") or []:
+        team_url = entry.get("team_url")
+        team_name = entry.get("team")
+        if not team_url or not team_name:
+            continue
+        team = _get_or_create_team(session, sport, team_url, team_name)
+
+        standing = (
+            session.query(Standing)
+            .filter_by(tournament_id=tournament.id, team_id=team.id)
+            .one_or_none()
+        )
+        if standing is None:
+            standing = Standing(tournament_id=tournament.id, team_id=team.id)
+            session.add(standing)
+
+        standing.rank = _int(entry.get("rank"))
+        standing.played = _int(entry.get("matches_played"))
+        standing.wins = _int(entry.get("wins"))
+        standing.draws = _int(entry.get("draws"))
+        standing.losses = _int(entry.get("losses"))
+        standing.goals_for = _int(entry.get("goals_for"))
+        standing.goals_against = _int(entry.get("goals_against"))
+        standing.points = _int(entry.get("points"))
+        standing.scraped_at = scraped_at
+        session.flush()
+        rows.append(standing)
+
+    session.commit()
+    return rows
