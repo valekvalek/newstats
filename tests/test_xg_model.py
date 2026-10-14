@@ -1,12 +1,18 @@
 import datetime as dt
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from newstats.db.base import Base
 from newstats.importer.flashscore import ingest_event, ingest_match_stats, ingest_odds
 from newstats.stats.value_bets import clv, compare_to_market, latest_1x2_odds
-from newstats.stats.xg_model import devig_1x2, predict_match, team_xg_strength
+from newstats.stats.xg_model import (
+    devig_1x2,
+    expected_goals,
+    predict_match,
+    team_xg_strength,
+)
 
 
 def _session():
@@ -168,6 +174,13 @@ def test_team_xg_strength_before_excludes_matches_on_or_after_cutoff():
     strength_no_cutoff = team_xg_strength(session, early.home_team_id)
     assert strength_no_cutoff.matches_considered == 2
     assert late.home_team_id == early.home_team_id  # sanity: same team in both matches
+
+
+def test_expected_goals_average_teams_match_league_avg_and_home_adv():
+    league_avg, home_adv = 1.4, 1.2
+    lh, la = expected_goals(league_avg, home_adv, attack_home=1.0, defense_home=1.0, attack_away=1.0, defense_away=1.0)
+    assert (lh + la) / 2 == pytest.approx(league_avg)
+    assert lh / la == pytest.approx(home_adv)
 
 
 def test_clv_positive_when_price_beat_the_close():

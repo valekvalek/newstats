@@ -116,6 +116,21 @@ def _poisson_pmf(k: int, lam: float) -> float:
     return math.exp(-lam) * lam**k / math.factorial(k)
 
 
+def expected_goals(
+    league_avg: float, home_adv: float, attack_home: float, defense_home: float, attack_away: float, defense_away: float
+) -> tuple[float, float]:
+    """
+    (lambda_home, lambda_away) for two average teams (attack=defense=1) satisfies
+    (lambda_home + lambda_away) / 2 == league_avg and lambda_home / lambda_away ==
+    home_adv -- splitting the home advantage between both sides this way, instead
+    of multiplying only lambda_home by it (the earlier version of this function),
+    avoided inflating the league's total expected goals whenever home_adv != 1.
+    """
+    base_home = league_avg * 2 * home_adv / (1 + home_adv)
+    base_away = league_avg * 2 / (1 + home_adv)
+    return base_home * attack_home * defense_away, base_away * attack_away * defense_home
+
+
 @dataclass
 class MatchPrediction:
     home_team_id: int
@@ -153,8 +168,7 @@ def predict_match(
     attack_away = away.xg_for_avg / league_avg
     defense_home = home.xg_against_avg / league_avg
 
-    lambda_home = league_avg * attack_home * defense_away * home_adv
-    lambda_away = league_avg * attack_away * defense_home
+    lambda_home, lambda_away = expected_goals(league_avg, home_adv, attack_home, defense_home, attack_away, defense_away)
 
     grid = [[_poisson_pmf(h, lambda_home) * _poisson_pmf(a, lambda_away) for a in range(_MAX_GOALS + 1)] for h in range(_MAX_GOALS + 1)]
 
