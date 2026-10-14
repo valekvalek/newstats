@@ -87,6 +87,15 @@ from newstats.db.models import (
 
 _STATUS_MAP: dict[str, MatchStatus] = {
     "finished": MatchStatus.FINISHED,
+    # Confirmed live (not "After ET"/"After Pen." as originally assumed from the
+    # docstring example -- see README "Известные ограничения"): "after extra time"
+    # carries the full 120-minute score, safe to treat as a normal result. "after
+    # 90 minutes" is the penalty-shootout case -- `score` is the PRE-shootout
+    # score, so who actually won isn't recoverable from this field; still FINISHED
+    # (the match is over), but callers that care about the 1X2 outcome specifically
+    # (e.g. scripts/backtest.py) should treat this status_raw as ambiguous and skip it.
+    "after extra time": MatchStatus.FINISHED,
+    "after 90 minutes": MatchStatus.FINISHED,
     "after pen.": MatchStatus.FINISHED,
     "after et": MatchStatus.FINISHED,
     "postponed": MatchStatus.POSTPONED,
@@ -110,6 +119,18 @@ def normalize_status(detail_status: str | None) -> MatchStatus:
     if "live" in key or re.fullmatch(r"\d{1,3}'?", key):
         return MatchStatus.LIVE
     return MatchStatus.UNKNOWN
+
+
+def is_penalty_decided(status_raw: str | None) -> bool:
+    """
+    True when `score` is known to be the PRE-shootout score (see
+    README "Известные ограничения") -- the match is FINISHED, but its 1X2
+    outcome as stored (home_score/away_score) does not reflect who actually
+    advanced/won. Callers that care about the match RESULT, not just the
+    goals scored, should exclude these rather than silently treating a
+    penalty-shootout loss as a draw.
+    """
+    return (status_raw or "").strip().lower() == "after 90 minutes"
 
 
 def parse_score(score: str | None) -> tuple[int | None, int | None]:
