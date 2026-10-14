@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import itertools
 import os
 import sys
 from pathlib import Path
@@ -40,7 +41,7 @@ from newstats.db.session import SessionLocal
 from newstats.importer.flashscore import is_penalty_decided
 from newstats.stats.metrics import OUTCOME_IDX, bootstrap_ci, brier3, logloss3
 from newstats.stats.value_bets import latest_1x2_odds
-from newstats.stats.xg_model import devig_1x2, predict_match
+from newstats.stats.xg_model import devig_1x2, predict_match, predict_match_fitted
 
 
 def actual_outcome(home_score: int, away_score: int) -> str:
@@ -66,6 +67,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--until", type=str, default=None, help="YYYY-MM-DD, exclusive")
     p.add_argument("--chunk-days", type=int, default=14, help="Size of the chronological buckets in the trend table")
     p.add_argument("--quiet", action="store_true", help="Skip the per-match lines, print only the summary")
+    p.add_argument(
+        "--method",
+        choices=["average", "fitted"],
+        default="average",
+        help="'average' = predict_match (shrunk team-vs-league-average); 'fitted' = predict_match_fitted (opponent-adjusted iterative fit, see its docstring for when NOT to trust it)",
+    )
+    p.add_argument("--xi", type=float, default=0.0, help="Recency decay for --method fitted (0 = no decay)")
     return p.parse_args()
 
 
@@ -99,9 +107,13 @@ def main() -> None:
     over25_hits = 0
     over25_actual = 0
     buckets: dict[dt.date, list[bool]] = {}
+    calibration_points: list[tuple[float, float]] = []  # (predicted_prob, 1.0-if-that-outcome-happened)
 
     for m in matches:
-        pred = predict_match(session, m.home_team_id, m.away_team_id, before=m.kickoff_at)
+        if args.method == "fitted":
+            pred = predict_match_fitted(session, m.home_team_id, m.away_team_id, before=m.kickoff_at, xi=args.xi)
+        else:
+            pred = predict_match(session, m.home_team_id, m.away_team_id, before=m.kickoff_at)
         actual = actual_outcome(m.home_score, m.away_score)
         k = OUTCOME_IDX[actual]
 
@@ -120,6 +132,8 @@ def main() -> None:
 
         model_brier.append(brier3(probs, k))
         model_ll.append(logloss3(probs, k))
+        for i, p in enumerate(probs):
+            calibration_points.append((p, 1.0 if i == k else 0.0))
         exact_score_hits += pred.most_likely_score == (m.home_score, m.away_score)
 
         actual_over25 = (m.home_score + m.away_score) > 2.5
@@ -174,6 +188,18 @@ def main() -> None:
         for key in sorted(buckets):
             bucket_hits = buckets[key]
             print(f"  {key}: {sum(bucket_hits)}/{len(bucket_hits)} = {sum(bucket_hits) / len(bucket_hits):.1%}  (n={len(bucket_hits)})")
+
+        print("\nCalibration (predicted prob. for an outcome vs how often it actually happened, pooled over home/draw/away):")
+        n_bins = 5
+        bin_edges = [i / n_bins for i in range(n_bins + 1)]
+        for lo, hi in itertools.pairwise(bin_edges):
+            in_bin = [(p, y) for p, y in calibration_points if lo <= p < hi or (hi == 1.0 and p == 1.0)]
+            if not in_bin:
+                print(f"  [{lo:.0%}, {hi:.0%}): n=0")
+                continue
+            mean_pred = sum(p for p, _ in in_bin) / len(in_bin)
+            actual_rate = sum(y for _, y in in_bin) / len(in_bin)
+            print(f"  [{lo:.0%}, {hi:.0%}): predicted avg={mean_pred:.1%}  actual rate={actual_rate:.1%}  n={len(in_bin)}")
     else:
         print("Nothing scored -- no matches had enough pre-match history.")
 

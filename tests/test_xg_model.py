@@ -5,12 +5,17 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from newstats.db.base import Base
+from newstats.db.models import Team
 from newstats.importer.flashscore import ingest_event, ingest_match_stats, ingest_odds
 from newstats.stats.value_bets import clv, compare_to_market, latest_1x2_odds
 from newstats.stats.xg_model import (
+    TeamXgStrength,
     devig_1x2,
     expected_goals,
+    fit_team_ratings,
     predict_match,
+    predict_match_fitted,
+    shrunk_attack_defense,
     team_xg_strength,
 )
 
@@ -176,6 +181,27 @@ def test_team_xg_strength_before_excludes_matches_on_or_after_cutoff():
     assert late.home_team_id == early.home_team_id  # sanity: same team in both matches
 
 
+def test_shrunk_attack_defense_pulls_small_samples_toward_league_average():
+    league_avg = 1.4
+    one_match = TeamXgStrength(team_id=1, xg_for_avg=3.0, xg_against_avg=0.2, matches_considered=1)
+    ten_matches = TeamXgStrength(team_id=2, xg_for_avg=3.0, xg_against_avg=0.2, matches_considered=10)
+
+    attack_1, defense_1 = shrunk_attack_defense(one_match, league_avg)
+    attack_10, defense_10 = shrunk_attack_defense(ten_matches, league_avg)
+
+    # both ratings pull toward 1.0 (league average), but the 1-match sample pulls harder
+    assert 1.0 < attack_1 < attack_10
+    assert defense_10 < defense_1 < 1.0
+
+
+def test_shrunk_attack_defense_exact_at_k_matches_is_50_50():
+    league_avg = 2.0
+    strength = TeamXgStrength(team_id=1, xg_for_avg=4.0, xg_against_avg=1.0, matches_considered=5)  # n == K == 5.0
+    attack, defense = shrunk_attack_defense(strength, league_avg)
+    assert attack == pytest.approx((0.5 * 4.0 + 0.5 * 2.0) / 2.0)
+    assert defense == pytest.approx((0.5 * 1.0 + 0.5 * 2.0) / 2.0)
+
+
 def test_expected_goals_average_teams_match_league_avg_and_home_adv():
     league_avg, home_adv = 1.4, 1.2
     lh, la = expected_goals(league_avg, home_adv, attack_home=1.0, defense_home=1.0, attack_away=1.0, defense_away=1.0)
@@ -216,3 +242,49 @@ def test_latest_1x2_odds_filters_by_snapshot():
 
     everything = latest_1x2_odds(session, match.id)
     assert everything == closing  # no snapshot filter -> most recently recorded, which is the close
+
+
+def test_fit_team_ratings_separates_strong_mid_weak_in_a_connected_league():
+    """A fully-connected round robin (every team plays every other team, so no
+    team's rating is determined by only one opponent) should recover the
+    obvious ordering: Strong scores a lot and concedes little, Weak the
+    opposite, Mid in between -- on both the attack and defense axes."""
+    session = _session()
+    counter = [0]
+
+    def play(home, away, home_xg, away_xg):
+        counter[0] += 1
+        url = f"https://fs.test/rr{counter[0]}?mid=rr{counter[0]}"
+        ingest_event(session, url, _event(home[0], home[1], away[0], away[1]))
+        _ingest_xg(session, url, home_xg, away_xg)
+
+    strong, mid, weak = ("Strong", "/team/strong/S1/"), ("Mid", "/team/mid/M1/"), ("Weak", "/team/weak/W1/")
+    play(strong, mid, 3.0, 0.5)
+    play(mid, strong, 0.5, 3.0)
+    play(strong, weak, 3.5, 0.3)
+    play(weak, strong, 0.3, 3.5)
+    play(mid, weak, 1.5, 1.0)
+    play(weak, mid, 1.0, 1.5)
+
+    ratings = fit_team_ratings(session)
+    teams = {name: session.query(Team).filter_by(name=name).one().id for name in ("Strong", "Mid", "Weak")}
+    attack_s, defense_s = ratings[teams["Strong"]]
+    attack_m, defense_m = ratings[teams["Mid"]]
+    attack_w, defense_w = ratings[teams["Weak"]]
+
+    assert attack_s > attack_m > attack_w  # higher = better attack
+    assert defense_s < defense_m < defense_w  # lower = better defense
+    assert attack_s > 1.0 > attack_w
+    assert defense_s < 1.0 < defense_w
+
+
+def test_fit_team_ratings_empty_without_data():
+    session = _session()
+    assert fit_team_ratings(session) == {}
+
+
+def test_predict_match_fitted_returns_none_for_unknown_team():
+    session = _session()
+    ingest_event(session, "https://fs.test/m1?mid=m1", _event("A", "/team/a/A1/", "B", "/team/b/B1/"))
+    _ingest_xg(session, "https://fs.test/m1?mid=m1", 1.5, 1.0)
+    assert predict_match_fitted(session, home_team_id=999, away_team_id=998) is None
