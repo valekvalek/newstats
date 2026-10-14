@@ -3,10 +3,8 @@ import json
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from conftest import make_session as _session
 
-from newstats.db.base import Base
 from newstats.db.models import MatchStatus
 from newstats.importer.flashscore import (
     extract_match_id,
@@ -32,12 +30,6 @@ MATCH_2_URL = "https://www.flashscore.com/match/football/team-b-XyZ987/team-a-Ab
 
 def _load(name: str) -> dict:
     return json.loads((FIXTURES / name).read_text())
-
-
-def _session():
-    engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    return sessionmaker(bind=engine, expire_on_commit=False)()
 
 
 def test_extract_match_id_prefers_mid():

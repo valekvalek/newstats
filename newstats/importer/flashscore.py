@@ -368,7 +368,7 @@ def ingest_standings(
 # require rendering the page's JS (Flashscore ships almost no stats in the
 # static HTML), so they're scraped directly with Playwright + BeautifulSoup,
 # not via the FlashscoreScraper package. The shapes below are what that
-# direct scrape produces; see scratchpad/collect_cl_match_details.py for the
+# direct scrape produces; see scripts/collect_match_details.py for the
 # actual scraper that builds them.
 #
 # stat entry shape: {"label": "Corner kicks", "home": "2", "away": "5"}

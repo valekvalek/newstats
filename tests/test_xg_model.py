@@ -1,10 +1,8 @@
 import datetime as dt
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from conftest import make_session as _session
 
-from newstats.db.base import Base
 from newstats.db.models import Team
 from newstats.importer.flashscore import ingest_event, ingest_match_stats, ingest_odds
 from newstats.stats.value_bets import clv, compare_to_market, latest_1x2_odds
@@ -18,12 +16,6 @@ from newstats.stats.xg_model import (
     shrunk_attack_defense,
     team_xg_strength,
 )
-
-
-def _session():
-    engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    return sessionmaker(bind=engine, expire_on_commit=False)()
 
 
 def _event(home_name: str, home_link: str, away_name: str, away_link: str) -> dict:

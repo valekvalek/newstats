@@ -61,6 +61,25 @@ def market_probs(session, match_id: int) -> tuple[float, float, float] | None:
     return tuple(sum(p[i] for p in ps) / len(ps) for i in range(3))
 
 
+def load_matches(session, since: str | None = None, until: str | None = None) -> list[Match]:
+    """
+    FINISHED matches with a score and a kickoff time, excluding penalty-shootout
+    matches (is_penalty_decided) -- the actual filtering logic scripts/backtest.py
+    runs on, pulled out so it's testable without going through main()/argparse.
+    `since`/`until` are "YYYY-MM-DD" strings, same as the CLI flags.
+    """
+    q = session.query(Match).filter(
+        Match.kickoff_at.isnot(None),
+        Match.home_score.isnot(None),
+        Match.status == MatchStatus.FINISHED,
+    )
+    if since:
+        q = q.filter(Match.kickoff_at >= dt.datetime.strptime(since, "%Y-%m-%d"))
+    if until:
+        q = q.filter(Match.kickoff_at < dt.datetime.strptime(until, "%Y-%m-%d"))
+    return [m for m in q.order_by(Match.kickoff_at).all() if not is_penalty_decided(m.status_raw)]
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--since", type=str, default=None, help="YYYY-MM-DD, inclusive")
@@ -81,18 +100,15 @@ def main() -> None:
     args = parse_args()
     session = SessionLocal()
 
-    q = session.query(Match).filter(
-        Match.kickoff_at.isnot(None),
-        Match.home_score.isnot(None),
-        Match.status == MatchStatus.FINISHED,
+    matches = load_matches(session, since=args.since, until=args.until)
+    q_unfiltered = session.query(Match).filter(
+        Match.kickoff_at.isnot(None), Match.home_score.isnot(None), Match.status == MatchStatus.FINISHED
     )
     if args.since:
-        q = q.filter(Match.kickoff_at >= dt.datetime.strptime(args.since, "%Y-%m-%d"))
+        q_unfiltered = q_unfiltered.filter(Match.kickoff_at >= dt.datetime.strptime(args.since, "%Y-%m-%d"))
     if args.until:
-        q = q.filter(Match.kickoff_at < dt.datetime.strptime(args.until, "%Y-%m-%d"))
-    all_matches = q.order_by(Match.kickoff_at).all()
-    matches = [m for m in all_matches if not is_penalty_decided(m.status_raw)]
-    pens_excluded = len(all_matches) - len(matches)
+        q_unfiltered = q_unfiltered.filter(Match.kickoff_at < dt.datetime.strptime(args.until, "%Y-%m-%d"))
+    pens_excluded = q_unfiltered.count() - len(matches)
     min_date = matches[0].kickoff_at.date() if matches else dt.date.today()
 
     print(f"--- backtesting {len(matches)} FINISHED matches (pre-match data only; {pens_excluded} penalty-shootout matches excluded) ---\n")
