@@ -31,13 +31,18 @@ class OddsComparison:
 _SELECTION_ALIASES = {"1": "Home", "X": "Draw", "2": "Away", "Home": "Home", "Draw": "Draw", "Away": "Away"}
 
 
-def latest_1x2_odds(session: Session, match_id: int) -> dict[str, dict[str, float]]:
-    """{bookmaker_name: {"Home": odds, "Draw": odds, "Away": odds}}, latest quote per (bookmaker, selection)."""
-    rows = session.execute(
-        select(Odds)
-        .where(Odds.match_id == match_id, Odds.market == "1x2-odds")
-        .order_by(Odds.recorded_at.desc())
-    ).scalars()
+def latest_1x2_odds(session: Session, match_id: int, snapshot: str | None = None) -> dict[str, dict[str, float]]:
+    """
+    {bookmaker_name: {"Home": odds, "Draw": odds, "Away": odds}}, latest quote
+    per (bookmaker, selection). Pass snapshot="close" to get the closing-line
+    odds specifically (requires scripts/snapshot_odds.py to have run);
+    without it, this is just whatever was last ingested, with no guarantee
+    of when relative to kickoff -- fine for a rough look, not for CLV.
+    """
+    query = select(Odds).where(Odds.match_id == match_id, Odds.market == "1x2-odds")
+    if snapshot is not None:
+        query = query.where(Odds.snapshot == snapshot)
+    rows = session.execute(query.order_by(Odds.recorded_at.desc())).scalars()
 
     latest: dict[str, dict[str, float]] = {}
     seen: set[tuple[str, str]] = set()
@@ -75,3 +80,14 @@ def compare_to_market(session: Session, match_id: int, home_team_id: int, away_t
             )
         )
     return prediction, comparisons
+
+
+def clv(odds_taken: float, p_close: float) -> float:
+    """
+    Closing Line Value for a bet taken at `odds_taken` on an outcome whose
+    de-vigged closing probability turned out to be `p_close`. Positive means
+    you beat the closing price (the standard proxy for "this was a good bet
+    on process", independent of whether it actually won) -- see
+    scripts/simulate_bets.py and snapshot="close" in scripts/snapshot_odds.py.
+    """
+    return odds_taken * p_close - 1

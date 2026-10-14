@@ -55,12 +55,13 @@ def ingest_odds_cmd(
     scraped_at: str = typer.Option(
         None, help="ISO timestamp for when this scrape ran; defaults to now"
     ),
+    snapshot: str = typer.Option(None, help="'t-24h' | 't-1h' | 'close', for CLV calculations; omit for ad-hoc scrapes"),
 ):
     """Ingest the output of: python main.py odds <url> (one call per odds type)."""
     when = dt.datetime.fromisoformat(scraped_at) if scraped_at else dt.datetime.now(dt.UTC)
     session = SessionLocal()
     try:
-        rows = ingest_odds(session, url, _read_json(file), when)
+        rows = ingest_odds(session, url, _read_json(file), when, snapshot=snapshot)
         typer.echo(f"ingested {len(rows)} odds row(s)")
     finally:
         session.close()

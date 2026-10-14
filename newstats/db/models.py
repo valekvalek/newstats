@@ -22,6 +22,7 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Index,
     Numeric,
     String,
     UniqueConstraint,
@@ -137,6 +138,10 @@ class Match(ExternalMixin, Base):
     home_score: Mapped[int | None] = mapped_column(nullable=True)
     away_score: Mapped[int | None] = mapped_column(nullable=True)
     periods: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    #: The match URL (the one you'd run `event` against), so odds-snapshot
+    #: tooling (scripts/snapshot_odds.py) can re-scrape it without needing a
+    #: separate team-slug lookup. Set by ingest_event.
+    url: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
     tournament: Mapped[Tournament] = relationship(back_populates="matches")
     home_team: Mapped[Team] = relationship(foreign_keys=[home_team_id])
@@ -216,6 +221,7 @@ class Odds(Base):
     """
 
     __tablename__ = "odds"
+    __table_args__ = (Index("ix_odds_match_market_time", "match_id", "market", "recorded_at"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     match_id: Mapped[int] = mapped_column(ForeignKey("matches.id"))
@@ -224,5 +230,10 @@ class Odds(Base):
     selection: Mapped[str] = mapped_column(String(64))  # e.g. "home", "over"
     value: Mapped[float] = mapped_column(Numeric(6, 3))
     recorded_at: Mapped[dt.datetime] = mapped_column(DateTime)
+    #: 't-24h' | 't-1h' | 'close' | None -- which pre-kickoff window
+    #: scripts/snapshot_odds.py took this quote in, for CLV calculations.
+    #: None for odds ingested without snapshot discipline (e.g. historical
+    #: backfills, or the ad-hoc ingest-odds-cmd runs before this existed).
+    snapshot: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     match: Mapped[Match] = relationship(back_populates="odds")

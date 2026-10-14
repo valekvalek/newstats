@@ -35,6 +35,9 @@ MAX_CONCURRENT = 5
 
 
 def build_match_url(m: Match) -> str:
+    """Prefer the URL ingest_event stored; reconstruct only for rows ingested before Match.url existed."""
+    if m.url:
+        return m.url
     home_slug = m.home_team.external_id.strip("/").split("/")[-2]
     home_id = m.home_team.external_id.strip("/").split("/")[-1]
     away_slug = m.away_team.external_id.strip("/").split("/")[-2]
@@ -161,7 +164,7 @@ async def main() -> None:
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=["--disable-gpu", "--disable-dev-shm-usage", "--disable-extensions"])
-        context = await browser.new_context()
+        context = await browser.new_context(timezone_id="UTC")
         results = await asyncio.gather(*[fetch_match_details(context, sem, mid, url) for mid, url in targets])
         await browser.close()
 

@@ -5,7 +5,7 @@ from sqlalchemy.orm import sessionmaker
 
 from newstats.db.base import Base
 from newstats.importer.flashscore import ingest_event, ingest_match_stats, ingest_odds
-from newstats.stats.value_bets import compare_to_market
+from newstats.stats.value_bets import clv, compare_to_market, latest_1x2_odds
 from newstats.stats.xg_model import devig_1x2, predict_match, team_xg_strength
 
 
@@ -168,3 +168,38 @@ def test_team_xg_strength_before_excludes_matches_on_or_after_cutoff():
     strength_no_cutoff = team_xg_strength(session, early.home_team_id)
     assert strength_no_cutoff.matches_considered == 2
     assert late.home_team_id == early.home_team_id  # sanity: same team in both matches
+
+
+def test_clv_positive_when_price_beat_the_close():
+    # Took 2.50, closing de-vigged probability implies a "fair" price of ~2.22 (1/0.45) -- so we beat it.
+    assert clv(2.50, 0.45) > 0
+    # Took 1.80 on something that closed implying ~2.22 fair -- we didn't beat it.
+    assert clv(1.80, 0.45) < 0
+
+
+def test_latest_1x2_odds_filters_by_snapshot():
+    session = _session()
+    match = ingest_event(session, "https://fs.test/m1?mid=m1", _event("A", "/team/a/A1/", "B", "/team/b/B1/"))
+    early = {
+        "url": "https://fs.test/m1/odds/1x2-odds?mid=m1",
+        "odd_type": "1x2-odds",
+        "data": [{"bookmaker_id": "2", "bookmaker_name": "Bet365", "bookmaker_link": "/b/2", "odds_values": [{"value": "1", "type": "Home", "odds": "2.10"}, {"value": "X", "type": "Draw", "odds": "3.40"}, {"value": "2", "type": "Away", "odds": "3.20"}]}],
+        "error": None,
+    }
+    close = {
+        "url": "https://fs.test/m1/odds/1x2-odds?mid=m1",
+        "odd_type": "1x2-odds",
+        "data": [{"bookmaker_id": "2", "bookmaker_name": "Bet365", "bookmaker_link": "/b/2", "odds_values": [{"value": "1", "type": "Home", "odds": "1.90"}, {"value": "X", "type": "Draw", "odds": "3.50"}, {"value": "2", "type": "Away", "odds": "3.80"}]}],
+        "error": None,
+    }
+    ingest_odds(session, "https://fs.test/m1?mid=m1", early, dt.datetime(2026, 1, 1), snapshot="t-24h")
+    ingest_odds(session, "https://fs.test/m1?mid=m1", close, dt.datetime(2026, 1, 2), snapshot="close")
+
+    closing = latest_1x2_odds(session, match.id, snapshot="close")
+    assert closing == {"Bet365": {"Home": 1.9, "Draw": 3.5, "Away": 3.8}}
+
+    opening = latest_1x2_odds(session, match.id, snapshot="t-24h")
+    assert opening == {"Bet365": {"Home": 2.1, "Draw": 3.4, "Away": 3.2}}
+
+    everything = latest_1x2_odds(session, match.id)
+    assert everything == closing  # no snapshot filter -> most recently recorded, which is the close

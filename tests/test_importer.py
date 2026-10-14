@@ -15,6 +15,7 @@ from newstats.importer.flashscore import (
     ingest_match_stats,
     ingest_odds,
     ingest_standings,
+    is_penalty_decided,
     normalize_status,
     parse_kickoff,
     parse_score,
@@ -60,10 +61,42 @@ def test_normalize_status():
     assert normalize_status("something new from the site") == MatchStatus.UNKNOWN
 
 
+def test_normalize_status_not_started_is_scheduled_not_unknown():
+    # Confirmed live: an upcoming match's detail_status is "" before kickoff, not None.
+    assert normalize_status("") == MatchStatus.SCHEDULED
+    assert normalize_status(None) == MatchStatus.UNKNOWN
+
+
+def test_normalize_status_extra_time_and_penalties():
+    assert normalize_status("After Extra Time") == MatchStatus.FINISHED
+    assert normalize_status("After 90 minutes") == MatchStatus.FINISHED
+
+
+def test_is_penalty_decided():
+    assert is_penalty_decided("After 90 minutes") is True
+    assert is_penalty_decided("After Extra Time") is False
+    assert is_penalty_decided("Finished") is False
+    assert is_penalty_decided(None) is False
+
+
 def test_parse_kickoff():
+    # Default SOURCE_TZ is UTC (no SOURCE_TZ env var set in tests), so this is an identity conversion.
     assert parse_kickoff("13.10.2026 22:00") == dt.datetime(2026, 10, 13, 22, 0)
     assert parse_kickoff(None) is None
     assert parse_kickoff("not a date") is None
+
+
+def test_parse_kickoff_converts_source_tz_to_utc():
+    from zoneinfo import ZoneInfo
+
+    import newstats.importer.flashscore as flashscore_module
+
+    original = flashscore_module.SOURCE_TZ
+    try:
+        flashscore_module.SOURCE_TZ = ZoneInfo("Europe/Moscow")  # UTC+3, no DST
+        assert flashscore_module.parse_kickoff("13.10.2026 22:00") == dt.datetime(2026, 10, 13, 19, 0)
+    finally:
+        flashscore_module.SOURCE_TZ = original
 
 
 def test_ingest_event_sets_kickoff_at():

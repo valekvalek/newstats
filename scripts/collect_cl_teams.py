@@ -134,7 +134,7 @@ async def main() -> None:
             headless=True,
             args=["--disable-gpu", "--disable-dev-shm-usage", "--disable-extensions"],
         )
-        context = await browser.new_context()
+        context = await browser.new_context(timezone_id="UTC")
 
         print(f"--- discovering last {MATCHES_PER_TEAM} matches for {len(TEAMS)} teams ---", flush=True)
         results = await asyncio.gather(

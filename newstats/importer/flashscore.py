@@ -66,9 +66,11 @@ moment the scrape ran, rather than inventing a field the source doesn't have.
 from __future__ import annotations
 
 import datetime as dt
+import os
 import re
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
@@ -111,8 +113,13 @@ _SCORE_RE = re.compile(r"(\d+)\s*-\s*(\d+)")
 
 
 def normalize_status(detail_status: str | None) -> MatchStatus:
-    if not detail_status:
+    # Confirmed live: a not-yet-started match's detail_status is "" (empty),
+    # not absent/None and not the literal "Scheduled" the original mapping
+    # assumed -- every upcoming match looks like this before kickoff.
+    if detail_status is None:
         return MatchStatus.UNKNOWN
+    if detail_status.strip() == "":
+        return MatchStatus.SCHEDULED
     key = detail_status.strip().lower()
     if key in _STATUS_MAP:
         return _STATUS_MAP[key]
@@ -143,14 +150,22 @@ def parse_score(score: str | None) -> tuple[int | None, int | None]:
     return int(match.group(1)), int(match.group(2))
 
 
+#: Flashscore renders `event["date"]` in whichever timezone the scraping browser
+#: is in (client-side JS, see README "Известные ограничения") -- not UTC and not
+#: a fixed site-wide zone. Set SOURCE_TZ to match the machine running the
+#: scraper; confirmed live as Europe/Moscow for this project's own scraping host.
+SOURCE_TZ = ZoneInfo(os.environ.get("SOURCE_TZ", "UTC"))
+
+
 def parse_kickoff(date_str: str | None) -> dt.datetime | None:
-    """'13.10.2026 22:00' -> naive datetime in the site's own (unspecified) timezone."""
+    """'13.10.2026 22:00' in SOURCE_TZ local time -> naive UTC datetime."""
     if not date_str:
         return None
     try:
-        return dt.datetime.strptime(date_str.strip(), "%d.%m.%Y %H:%M")
+        naive_local = dt.datetime.strptime(date_str.strip(), "%d.%m.%Y %H:%M")
     except ValueError:
         return None
+    return naive_local.replace(tzinfo=SOURCE_TZ).astimezone(dt.UTC).replace(tzinfo=None)
 
 
 def extract_match_id(match_url: str) -> str:
@@ -225,6 +240,7 @@ def ingest_event(session: Session, match_url: str, event: dict[str, Any], sport_
     match.tournament_id = tournament.id
     match.home_team_id = home_team.id
     match.away_team_id = away_team.id
+    match.url = match_url
     match.status_raw = event.get("detail_status")
     match.status = normalize_status(event.get("detail_status"))
     match.home_score, match.away_score = parse_score(event.get("score"))
@@ -233,7 +249,13 @@ def ingest_event(session: Session, match_url: str, event: dict[str, Any], sport_
     return match
 
 
-def ingest_odds(session: Session, match_url: str, odds_result: dict[str, Any], scraped_at: dt.datetime) -> list[Odds]:
+def ingest_odds(
+    session: Session,
+    match_url: str,
+    odds_result: dict[str, Any],
+    scraped_at: dt.datetime,
+    snapshot: str | None = None,
+) -> list[Odds]:
     """
     `match_url` is the URL you ran `event` against for this match, same as
     every other ingest_* function here -- NOT `odds_result["url"]`. Confirmed
@@ -243,6 +265,10 @@ def ingest_odds(session: Session, match_url: str, odds_result: dict[str, Any], s
     was originally ingested under. Deriving the match purely from that field
     (as an earlier version of this function did) silently failed to find the
     match on real data despite working against the fixtures.
+
+    `snapshot` tags which pre-kickoff window this quote belongs to
+    ('t-24h' | 't-1h' | 'close'), for CLV calculations -- leave it unset
+    for ad-hoc scrapes with no snapshot discipline. See scripts/snapshot_odds.py.
     """
     if odds_result.get("error"):
         return []
@@ -269,6 +295,7 @@ def ingest_odds(session: Session, match_url: str, odds_result: dict[str, Any], s
                 selection=value["type"],
                 value=price,
                 recorded_at=scraped_at,
+                snapshot=snapshot,
             )
             session.add(row)
             rows.append(row)
